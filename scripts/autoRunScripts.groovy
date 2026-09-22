@@ -6,7 +6,10 @@
 //Added Column Sorting aaa1386
 //Added Group Categorization aaa1386
 //Added Drag & Drop from Table to Group Tree aaa1386
-//Added Group Rename and Delete
+//Group Rename and Delete
+//fix: group dropdown scroll in AutoRun table
+//revert(autoRunScripts): restore column sorting in table
+
 import java.awt.*
 import java.awt.event.*
 import java.awt.dnd.DropTargetEvent
@@ -1040,7 +1043,7 @@ def openDialog = {
     }
     table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION)
     fitRowHeight(table)
-    table.setAutoCreateRowSorter(false)
+    
     fixColumn(table, 0, 'On')
     fixColumn(table, 1, '99')
     // extra room: while editing, the combo box puts an arrow button inside this column
@@ -1051,10 +1054,23 @@ def openDialog = {
     preferColumn(table, 6, 'Uncategorized')
     sizeTableToColumns(table, 16)
     table.columnModel.getColumn(2).setCellEditor(new DefaultCellEditor(new JComboBox(TRIGGER_LABELS as String[])))
-    table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(new JComboBox(model.groupLabels as String[])))
+    def makeGroupCombo = {
+    def combo = new JComboBox(model.groupLabels as String[])
+    combo.maximumRowCount = 15          // بعد از ۱۵ آیتم، اسکرول ظاهر می‌شود
+    combo.setPrototypeDisplayValue('a group name of medium length')
+    return combo
+}
+table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupCombo()))
 
     def sorter = new TableRowSorter<AutoRunTableModel>(model)
-    (0..<model.columnCount).each { sorter.setSortable(it, false) }
+    // On و # غیرفعال، بقیه فعال
+    sorter.setSortable(0, false)
+    sorter.setSortable(1, false)
+    sorter.setSortable(2, true)
+    sorter.setSortable(3, true)
+    sorter.setSortable(4, true)
+    sorter.setSortable(5, true)
+    sorter.setSortable(6, true)
     table.setRowSorter(sorter)
     table.dragEnabled = true
     table.transferHandler = new TransferHandler() {
@@ -1129,8 +1145,10 @@ def openDialog = {
     }
 
     def refreshGroupEditor = {
-        table.columnModel.getColumn(6).setCellEditor(
-                new DefaultCellEditor(new JComboBox(model.groupLabels as String[])))
+        def combo = new JComboBox(model.groupLabels as String[])
+        combo.maximumRowCount = 20
+        combo.setPrototypeDisplayValue('a group name of medium length')
+        table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(combo))
     }
 
     // ------------------------------------------------------------
@@ -2370,6 +2388,12 @@ def openDialog = {
 
     upButton.addActionListener({ moveSelected(-1) } as ActionListener)
     downButton.addActionListener({ moveSelected(1) } as ActionListener)
+    // وقتی سورت فعاله، ▲▼ غیرفعال؛ وقتی سورت غیرفعاله، ▲▼ فعال
+    sorter.addRowSorterListener({ event ->
+        boolean sorted = sorter.sortKeys != null && !sorter.sortKeys.isEmpty()
+        upButton.enabled = !sorted
+        downButton.enabled = !sorted
+    } as RowSorterListener)
     runSelectedButton.addActionListener({
         int viewRow = table.selectedRow
         runFiles(viewRow < 0 ? [] : [model.fileAt(table.convertRowIndexToModel(viewRow))])
