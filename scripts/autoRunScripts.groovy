@@ -1645,8 +1645,9 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
                 }
             })
 
-            installGroupDropTarget(menu, group)
+            
             installGroupDragSource(menu, group)
+            installGroupDropTarget(menu, group)
 
             def children = directChildren(group)
 
