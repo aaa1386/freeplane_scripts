@@ -9,7 +9,23 @@
 //Group Rename and Delete
 //fix: group dropdown scroll in AutoRun table
 //revert(autoRunScripts): restore column sorting in table
-
+/* =========================================================
+  HOW TO ASSIGN A SCRIPT TO A GROUP
+  ============================================================
+ 
+   1. DRAG AND DROP
+ *     Drag a row from the table and drop it onto the Groups
+      button or onto a group inside the flyout tree.
+ 
+   2. CLICK THE "Group" COLUMN IN THE TABLE
+ *     Click the Group cell of a row to open a dropdown with all
+      groups. Pick one. The list scrolls if there are many and
+      follows the tree order.
+ 
+  Assigning a group never changes the trigger and never enables
+  the script. A switched-off row stays switched off; only its
+  group changes.
+  ============================================================ */
 import java.awt.*
 import java.awt.event.*
 import java.awt.dnd.DropTargetEvent
@@ -407,10 +423,15 @@ class AutoRunTableModel extends AbstractTableModel {
         if (column == 0) return Boolean.valueOf(configured && active[row].enabled)
         if (column == 4) return file.name.replaceFirst(/(?i)\.groovy$/, '')
         if (column == 5) return file.isFile() ? file.parentFile.name : 'MISSING'
-        if (column == 6) return configured ? (active[row].group ?: 'Uncategorized') : 'Uncategorized'
+        if (column == 6) return configured ? (active[row].group ?: 'Uncategorized') : ''
         if (!configured) return ''
         def entry = active[row]
-        if (column == 2) return triggerLabels[AutoRunDispatcher.TRIGGERS.indexOf(entry.trigger)]
+        if (column == 2) {
+    // برای اسکریپت‌های غیرفعال، تریگر را خالی نشان بده؛
+    // کاربر هنوز تریگری انتخاب نکرده است، فقط گروه داده
+    if (!entry.enabled) return ''
+    return triggerLabels[AutoRunDispatcher.TRIGGERS.indexOf(entry.trigger)]
+}
         if (column == 3) return entry.trigger == 'PERIODIC' ? "${entry.everyMinutes} min".toString() : ''
         if (!entry.enabled) return '--'
         return String.valueOf(active.take(row).count { it.trigger == entry.trigger && it.enabled } + 1)
@@ -441,7 +462,7 @@ class AutoRunTableModel extends AbstractTableModel {
         else if (column == 6) {
             if (row >= active.size()) {
                 activate(file, 'STARTUP', AutoRunDispatcher.DEFAULT_MINUTES,
-                         String.valueOf(value), true)
+                         String.valueOf(value), false)
             }
             else {
                 String group = String.valueOf(value).trim()
@@ -1159,7 +1180,7 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
     def groupsPopup = null
     def groupManagerDialog = null
     def groupsButton = null
-    def openGroupManager = null
+    
         def uiParent = {
             return (Object) UITools.currentFrame
         }
@@ -1296,34 +1317,6 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
         return true
     }
 
-    def deleteGroup = { String path ->
-        if (!path || path == DEFAULT_GROUP) {
-            // CHANGED: uiParent() instead of table
-            JOptionPane.showMessageDialog(uiParent(), 'The Uncategorized group cannot be deleted.')
-            return false
-        }
-        def descendants = subtree(path)
-        String parent = groupParent(path)
-        String destination = DEFAULT_GROUP
-        String warning = descendants.size() > 1
-                ? "Delete '${groupDisplay(path)}' and its ${descendants.size() - 1} child group(s)?\nScripts in them will move to '${groupDisplay(destination)}'."
-                : "Delete '${groupDisplay(path)}'?\nIts scripts will move to '${groupDisplay(destination)}'."
-        // CHANGED: uiParent() instead of table
-        int answer = JOptionPane.showConfirmDialog(uiParent(), warning,
-                'Delete virtual group', JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE)
-        if (answer != JOptionPane.YES_OPTION) return false
-
-        model.active.each { entry ->
-            String g = entry.group ?: DEFAULT_GROUP
-            if (g == path || g.startsWith(path + '/')) entry.group = destination
-        }
-        model.groupLabels.removeAll(descendants)
-        activeGroupId = destination
-        refreshGroupUI()
-        status.text = "Group deleted: ${groupDisplay(path)}."
-        return true
-    }
-
     def groupIcon = UIManager.getIcon('FileView.directoryIcon')
     def scriptIcon = UIManager.getIcon('FileView.fileIcon')
 
@@ -1393,24 +1386,31 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
 
     def assignScriptToGroup = { File file, String group ->
         if (!file || !group) return false
-
+    
         def entry = model.active.find { it.file == file }
-
+    
         if (entry == null) {
-            status.text = "${file.name} is not an active script."
-            return false
+            // اسکریپت در لیست فعال نیست — به لیست اضافه‌اش کن، ولی خاموش
+            if (!file.isFile()) {
+                status.text = "${file.name} not found on disk."
+                return false
+            }
+            model.activate(file, 'STARTUP', AutoRunDispatcher.DEFAULT_MINUTES, group, false)
+            writeEntries(model.active)
+            writeGroupData(model.groupLabels, model.active)
+            selectFile(file)
+            status.text = "Added ${file.name} to group '${groupDisplay(group)}' (switched off)."
+            return true
         }
-
+    
         entry.group = group
         activeGroupId = group
-
+    
         refreshGroupUI()
         writeGroupData(model.groupLabels, model.active)
         selectFile(file)
-
-        status.text =
-                "Moved '${file.name}' to '${groupDisplay(group)}'."
-
+    
+        status.text = "Moved '${file.name}' to '${groupDisplay(group)}'."
         return true
     }
 
@@ -1419,23 +1419,24 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
     def installGroupDropTarget
     def installGroupDragSource
 
-    installGroupDropTarget = { JMenu menu, String group ->
+    installGroupDropTarget = { JComponent target, String group ->
 
         Closure activateMenu = {
             String previousGroup = activeGroupId
-
-            if (lastDragMenu != null && lastDragMenu != menu) {
+        
+            if (lastDragMenu != null && lastDragMenu != target) {
                 try {
                     boolean movingIntoChild =
                             previousGroup &&
                             group.startsWith(previousGroup + '/')
-
+        
                     if (!movingIntoChild) {
                         lastDragMenu.setSelected(false)
                         lastDragMenu.getModel().setArmed(false)
                         lastDragMenu.getModel().setRollover(false)
-
-                        if (lastDragMenu.isPopupMenuVisible()) {
+        
+                        if (lastDragMenu instanceof JMenu &&
+                                lastDragMenu.isPopupMenuVisible()) {
                             lastDragMenu.setPopupMenuVisible(false)
                         }
                     }
@@ -1443,26 +1444,27 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
                 catch (Throwable ignored) {
                 }
             }
-
-            lastDragMenu = menu
+        
+            lastDragMenu = target
             activeGroupId = group
-
+        
             try {
-                menu.setSelected(true)
-                menu.getModel().setArmed(true)
-                menu.getModel().setRollover(true)
-
-                if (menu.menuComponentCount > 0 &&
-                        !menu.isPopupMenuVisible()) {
-                    menu.setPopupMenuVisible(true)
+                if (target instanceof JMenu) {
+                    target.setSelected(true)
+                    target.getModel().setArmed(true)
+                    target.getModel().setRollover(true)
+        
+                    if (target.menuComponentCount > 0 &&
+                            !target.isPopupMenuVisible()) {
+                        target.setPopupMenuVisible(true)
+                    }
                 }
             }
             catch (Throwable ignored) {
             }
         }
 
-        new DropTarget(
-                menu,
+        new DropTarget(target,
                 DnDConstants.ACTION_MOVE,
                 new DropTargetAdapter() {
 
@@ -1630,24 +1632,29 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
                 menu.icon = groupIcon
 
             menu.addMenuListener(new MenuListener() {
-
                 @Override
                 void menuSelected(MenuEvent e) {
                     activeGroupId = group
+                    // زیرمنو هم DropTarget بگیرد تا دراپ روی زیرمنو کار کند
+                    SwingUtilities.invokeLater({
+                        def sub = menu.popupMenu
+                        if (sub != null) {
+                            installGroupDropTarget(sub, group)
+                        }
+                    } as Runnable)
                 }
-
+            
                 @Override
                 void menuDeselected(MenuEvent e) {
                 }
-
+            
                 @Override
                 void menuCanceled(MenuEvent e) {
                 }
             })
 
-            
-            installGroupDragSource(menu, group)
             installGroupDropTarget(menu, group)
+            installGroupDragSource(menu, group)
 
             def children = directChildren(group)
 
@@ -1754,19 +1761,7 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
 
         groupsPopup.add(newRoot)
 
-        def manage =
-                new JMenuItem('Manage groups...')
-
-        manage.addActionListener({
-            if (groupsPopup != null)
-                groupsPopup.setVisible(false)
-
-            SwingUtilities.invokeLater({
-                openGroupManager()
-            } as Runnable)
-        } as ActionListener)
-
-        groupsPopup.add(manage)
+        
 
         groupsPopup.show(
                 groupsButton,
@@ -1775,352 +1770,7 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
         )
     }
 
-    openGroupManager = {
-        def managerName = 'autoRunScriptsGroupManager'
-        Window.windows.findAll { it.name == managerName && it.displayable }.each { it.dispose() }
-
-        def listModel = new DefaultListModel<String>()
-        def groupList = new JList<String>(listModel)
-        groupList.selectionMode = ListSelectionModel.SINGLE_SELECTION
-
-        groupList.visibleRowCount = 12
-        groupList.cellRenderer = new DefaultListCellRenderer() {
-            @Override
-            Component getListCellRendererComponent(JList list, Object value, int index,
-                                                   boolean selected, boolean focused) {
-                super.getListCellRendererComponent(list, value, index, selected, focused)
-                int depth = groupDepth(String.valueOf(value))
-                text = ('    ' * depth) + groupBase(String.valueOf(value))
-                toolTipText = groupDisplay(String.valueOf(value))
-                return this
-            }
-        }
-        //groupList.dragEnabled = true
-        groupList.dropMode = DropMode.INSERT
-
-        groupList.transferHandler = new TransferHandler() {
-
-            @Override
-            int getSourceActions(JComponent component) {
-                return MOVE
-            }
-
-            @Override
-            Transferable createTransferable(JComponent component) {
-                def list = (JList) component
-                int index = list.selectedIndex
-                if (index < 0 || index >= model.groupLabels.size()) return null
-
-                String path = model.groupLabels[index]
-
-                if (!path || path == DEFAULT_GROUP) return null
-
-                return new StringSelection('GROUP:' + path)
-            }
-
-            @Override
-            boolean canImport(TransferSupport support) {
-                if (!support.isDataFlavorSupported(DataFlavor.stringFlavor))
-                    return false
-
-                if (!(support.dropLocation instanceof JList.DropLocation))
-                    return false
-
-                return true
-            }
-
-            @Override
-            boolean importData(TransferSupport support) {
-                if (!canImport(support))
-                    return false
-
-                try {
-                    String value = String.valueOf(
-                            support.transferable.getTransferData(
-                                    DataFlavor.stringFlavor))
-
-                    if (!value.startsWith('GROUP:'))
-                        return false
-
-                    String sourceGroup = value.substring(6)
-
-                    if (!sourceGroup ||
-                            sourceGroup == DEFAULT_GROUP ||
-                            !model.groupLabels.contains(sourceGroup))
-                        return false
-
-                    def dl = (JList.DropLocation) support.dropLocation
-                    int targetIndex = dl.index
-
-                    if (targetIndex < 0)
-                        targetIndex = model.groupLabels.size()
-
-                    int sourceIndex = model.groupLabels.indexOf(sourceGroup)
-
-                    if (sourceIndex < 0)
-                        return false
-
-                    /*
-                     * یک گروه نمی‌تواند داخل خودش قرار بگیرد.
-                     * در JList فقط ترتیب خطی را جابه‌جا می‌کنیم؛
-                     * ساختار parent/child از مسیرهای / حفظ می‌شود.
-                     */
-
-                    def block = subtree(sourceGroup)
-
-                    /*
-                     * اگر مقصد داخل خود block باشد، عملیات بی‌معناست.
-                     */
-                    if (targetIndex >= sourceIndex &&
-                            targetIndex <= sourceIndex + block.size()) {
-                        return false
-                    }
-
-                    /*
-                     * کل زیرشاخه را یک‌جا خارج می‌کنیم.
-                     */
-                    model.groupLabels.removeAll(block)
-
-                    /*
-                     * محل واقعی درج را بعد از حذف محاسبه می‌کنیم.
-                     */
-                    int adjustedIndex = targetIndex
-
-                    if (sourceIndex < targetIndex)
-                        adjustedIndex -= block.size()
-
-                    adjustedIndex = Math.max(
-                            0,
-                            Math.min(
-                                    adjustedIndex,
-                                    model.groupLabels.size()
-                            )
-                    )
-
-                    /*
-                     * گروه و تمام فرزندانش باید با هم جابه‌جا شوند.
-                     */
-                    model.groupLabels.addAll(
-                            adjustedIndex,
-                            block
-                    )
-
-                    refreshGroupUI()
-
-                    activeGroupId = sourceGroup
-
-                    refresh(sourceGroup)
-
-                    status.text =
-                            "Group order changed: ${groupDisplay(sourceGroup)}."
-
-                    return true
-                }
-                catch (Throwable t) {
-                    LogUtils.warn(
-                            'Could not reorder groups by drag and drop.',
-                            t
-                    )
-
-                    status.text =
-                            "Could not move group: ${t.message}"
-
-                    return false
-                }
-            }
-        }
-        def refresh = { String selectedPath = activeGroupId ->
-            listModel.clear()
-            model.groupLabels.each { listModel.addElement(it) }
-            if (selectedPath && model.groupLabels.contains(selectedPath)) {
-                groupList.selectedIndex = model.groupLabels.indexOf(selectedPath)
-            }
-        }
-        refresh()
-
-        // -----------------------------------------------------------------
-        // CHANGED: mouse handling
-        //   - Left click on a group opens the Rename dialog.
-        //   - Right click opens a small popup menu with Rename / Delete.
-        //   - The Uncategorized group is protected (Rename/Delete disabled).
-        // -----------------------------------------------------------------
-        // ---------- Right-click: select item under cursor ----------
-        groupList.addMouseListener(new MouseAdapter() {
-            @Override
-            void mousePressed(MouseEvent event) {
-                if (SwingUtilities.isRightMouseButton(event)) {
-                    int idx = groupList.locationToIndex(event.point)
-                    if (idx < 0) return
-                    Rectangle r = groupList.getCellBounds(idx, idx)
-                    if (r == null || !r.contains(event.point)) return
-                    groupList.setSelectedIndex(idx)
-                    activeGroupId = model.groupLabels[idx]
-                }
-            }
-        
-            @Override
-            void mouseClicked(MouseEvent event) {
-                if (!SwingUtilities.isLeftMouseButton(event)) return
-                if (event.clickCount != 1) return
-                int idx = groupList.locationToIndex(event.point)
-                if (idx < 0) return
-                Rectangle r = groupList.getCellBounds(idx, idx)
-                if (r == null || !r.contains(event.point)) return
-                String sel = model.groupLabels[idx]
-                if (sel == DEFAULT_GROUP) return
-                activeGroupId = sel
-                if (renameGroup(sel)) refresh(activeGroupId)
-            }
-        })
-        
-        // ---------- Popup via setComponentPopupMenu (proven to work) ----------
-        def listRenameItem = new JMenuItem('Rename...')
-        def listDeleteItem = new JMenuItem('Delete')
-        def listPopup = new JPopupMenu()
-        listPopup.add(listRenameItem)
-        listPopup.add(listDeleteItem)
-        
-        listPopup.addPopupMenuListener(new PopupMenuListener() {
-            @Override
-            void popupMenuWillBecomeVisible(PopupMenuEvent e) {
-                int idx = groupList.selectedIndex
-                boolean isDefault = (idx < 0) ||
-                        (idx < model.groupLabels.size() && model.groupLabels[idx] == DEFAULT_GROUP)
-                listRenameItem.enabled = !isDefault
-                listDeleteItem.enabled = !isDefault
-            }
-            @Override
-            void popupMenuWillBecomeInvisible(PopupMenuEvent e) {}
-            @Override
-            void popupMenuCanceled(PopupMenuEvent e) {}
-        })
-        
-        listRenameItem.addActionListener({
-            int idx = groupList.selectedIndex
-            if (idx < 0) return
-            String sel = model.groupLabels[idx]
-            if (sel == DEFAULT_GROUP) return
-            activeGroupId = sel
-            if (renameGroup(sel)) refresh(activeGroupId)
-        } as ActionListener)
-        
-        listDeleteItem.addActionListener({
-            int idx = groupList.selectedIndex
-            if (idx < 0) return
-            String sel = model.groupLabels[idx]
-            if (sel == DEFAULT_GROUP) return
-            activeGroupId = sel
-            if (deleteGroup(sel)) refresh(activeGroupId)
-        } as ActionListener)
-        
-        groupList.setComponentPopupMenu(listPopup)
-        
-        
-
-        def groupDeleteAction = new AbstractAction() {
-
-            @Override
-            void actionPerformed(ActionEvent event) {
-
-                int index = groupList.selectedIndex
-
-                if (index < 0)
-                    return
-
-                String selected = model.groupLabels[index]
-
-                if (selected == DEFAULT_GROUP)
-                    return
-
-                activeGroupId = selected
-
-                if (deleteGroup(selected))
-                    refresh(activeGroupId)
-            }
-
-        }
-
-        groupList.getInputMap(JComponent.WHEN_FOCUSED).put(
-                KeyStroke.getKeyStroke(KeyEvent.VK_DELETE, 0),
-                'deleteSelectedGroup'
-        )
-
-        groupList.getActionMap().put(
-                'deleteSelectedGroup',
-                groupDeleteAction
-        )
-
-        def addButton = new JButton('New root group')
-        def childButton = new JButton('New child group')
-        def renameButton = new JButton('Rename')
-        def deleteButton = new JButton('Delete')
-        def closeButton = new JButton('Close')
-
-        def content = new JPanel(new BorderLayout(8, 8))
-        content.border = BorderFactory.createEmptyBorder(8, 8, 8, 8)
-        content.add(new JScrollPane(groupList), BorderLayout.CENTER)
-
-        // CHANGED: non-modal (false) so that JOptionPane dialogs stay usable
-        groupManagerDialog = new JDialog(dialog, 'Virtual script groups', false)
-        groupManagerDialog.name = managerName
-        groupManagerDialog.contentPane = content
-        groupManagerDialog.setSize(520, 420)
-        groupManagerDialog.setLocationRelativeTo(dialog)
-
-        groupList.addListSelectionListener({
-            if (!it.valueIsAdjusting && groupList.selectedIndex >= 0) {
-
-                activeGroupId =
-                        model.groupLabels[groupList.selectedIndex]
-
-                boolean isDefault =
-                        activeGroupId == DEFAULT_GROUP
-
-                renameButton.enabled = !isDefault
-                deleteButton.enabled = !isDefault
-            }
-
-        } as ListSelectionListener)
-
-        addButton.addActionListener({
-            String created = createGroup(null, false)
-            if (created) refresh(created)
-        } as ActionListener)
-        childButton.addActionListener({
-            String parent = groupList.selectedIndex >= 0 ? model.groupLabels[groupList.selectedIndex] : null
-            if (!parent) {
-                JOptionPane.showMessageDialog(groupManagerDialog, 'Select a parent group first.')
-                return
-            }
-            String created = createGroup(parent, false)
-            if (created) refresh(created)
-        } as ActionListener)
-        renameButton.addActionListener({
-            if (groupList.selectedIndex < 0) return
-            String selected = model.groupLabels[groupList.selectedIndex]
-            if (renameGroup(selected)) refresh(activeGroupId)
-        } as ActionListener)
-        deleteButton.addActionListener({
-            if (groupList.selectedIndex < 0) return
-            String selected = model.groupLabels[groupList.selectedIndex]
-            if (deleteGroup(selected)) refresh(activeGroupId)
-        } as ActionListener)
-
-        def buttons = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6))
-        [addButton, childButton, renameButton, deleteButton].each { buttons.add(it) }
-        content.add(buttons, BorderLayout.NORTH)
-        def bottom = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 6))
-        bottom.add(closeButton)
-        content.add(bottom, BorderLayout.SOUTH)
-
-        closeButton.addActionListener({ groupManagerDialog.dispose() } as ActionListener)
-        groupManagerDialog.addWindowListener(new WindowAdapter() {
-            @Override void windowClosed(WindowEvent e) { groupManagerDialog = null }
-        })
-        groupManagerDialog.rootPane.registerKeyboardAction({ groupManagerDialog.dispose() } as ActionListener,
-                KeyStroke.getKeyStroke(KeyEvent.VK_ESCAPE, 0), JComponent.WHEN_IN_FOCUSED_WINDOW)
-        groupManagerDialog.visible = true
-    }
+    
 
     def moveSelected = { int delta ->
         int viewRow = table.selectedRow
@@ -2222,9 +1872,6 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
     def filterBar = new JPanel(new BorderLayout())
     filterBar.add(filterRow, BorderLayout.NORTH)
     filterBar.add(hintRow, BorderLayout.SOUTH)
-
-    def upButton = new JButton('▲')
-    def downButton = new JButton('▼')
 
     def removeButton = new JButton('Remove')
     removeButton.toolTipText = 'Take the selected script off the list. Unticking only switches it off, keeping its settings.'
@@ -2387,14 +2034,8 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
 
     def closeButton = new JButton('Close')
 
-    upButton.addActionListener({ moveSelected(-1) } as ActionListener)
-    downButton.addActionListener({ moveSelected(1) } as ActionListener)
-    // وقتی سورت فعاله، ▲▼ غیرفعال؛ وقتی سورت غیرفعاله، ▲▼ فعال
-    sorter.addRowSorterListener({ event ->
-        boolean sorted = sorter.sortKeys != null && !sorter.sortKeys.isEmpty()
-        upButton.enabled = !sorted
-        downButton.enabled = !sorted
-    } as RowSorterListener)
+    
+    
     runSelectedButton.addActionListener({
         int viewRow = table.selectedRow
         runFiles(viewRow < 0 ? [] : [model.fileAt(table.convertRowIndexToModel(viewRow))])
@@ -2402,7 +2043,7 @@ table.columnModel.getColumn(6).setCellEditor(new DefaultCellEditor(makeGroupComb
     runAllButton.addActionListener({ runFiles(model.active.collect { it.file }) } as ActionListener)
 
     def buttonBar = new JPanel(new FlowLayout(FlowLayout.LEFT, 6, 6))
-    [groupsButton, upButton, downButton, removeButton, runSelectedButton, runAllButton, historyButton,
+    [groupsButton, removeButton, runSelectedButton, runAllButton, historyButton,
      pauseButton, hookButton].each { buttonBar.add(it) }
     def rightBar = new JPanel(new FlowLayout(FlowLayout.RIGHT, 6, 6))
     rightBar.add(closeButton)
