@@ -1,7 +1,28 @@
-// Copyright (C) 2026  euu2021 (Github)
+/*MODIFICATIONS & ENHANCEMENTS BY: aaa1386 (Github)
+ORIGINAL CODE BY: euu2021 (Github)
+ Copyright (C) 2026  aaa1386 (Github) - based on euu2021's original work
+SPDX-License-Identifier: GPL-2.0-or-later
+
+Added:
+1-Add 🔀 Merge/Assign option, 
+2-Add ⚡ Add Child Tag (Fast)option,
+3-Add 📍 Locate Tag option
+4-Merged Edit Mode and Assign Mode into a single unified interaction mode.
+5-Assigning Ctrl+Up/Down for Navigating Search Results
+
+The ⚡ Add Child (Fast) option is especially useful for large maps with many nodes because it creates new tags without the delay experienced by the standard Add Child Tag (Insert) method, which can become noticeably slower on large maps.
+*/
+
+// Copyright (c) 2026 euu2021
 // SPDX-License-Identifier: GPL-2.0-or-later
-// Discussion thread: https://github.com/freeplane/freeplane/discussions/2953
-// Version: 1.2
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU General Public License as published by
+// the Free Software Foundation, either version 2 of the License, or
+// (at your option) any later version.
+
+
+// @ExecutionModes({ON_SINGLE_NODE="/menu_bar/euu/tags"})
+
 
 /***************************************************************************
 
@@ -99,27 +120,7 @@
                                 since the panel hangs on the right edge); » restores it
    - ✕ / ESC                 -> close (also clears the map filter it applied)
 
- CHANGELOG
- ---------
-   1.2 (2026-08-01)
-       Faster panel. Two changes, both invisible: the panel body is now painted with the map's
-       own background instead of being see-through (a transparent component makes each of its
-       repaints redraw the whole map underneath — set opaquePanelBody = false for the old look),
-       and the row renderer keeps its parsed HTML instead of rebuilding it on every repaint.
-   1.1 (2026-07-26)
-       Survives a map whose tag registry holds a NAMELESS tag. Freeplane refuses to read
-       the tags of such a map at all ("path contains blank segment"), and the panel used
-       to report just that and stop. It now names the cause and offers a one-click repair
-       on the status bar, which drops the nameless tag from the registry AND from the nodes
-       that carry it (cleaning only the registry would let it come back on the next load),
-       as a normal undo step. SAVE the map afterwards, or the repair is lost.
-       Also fixes a latent crash on any map with a TRANSLUCENT tag colour: blendColors took
-       a primitive float, and the alpha ratio is a Double in Groovy.
-   1.0 (2026-07-26)
-       First public version.
-
  *****************************************************************/
-
 import groovy.transform.Field
 
 import org.freeplane.api.MapTagCategoryInstruction
@@ -151,6 +152,8 @@ import org.freeplane.plugin.script.proxy.ProxyFactory
 import org.freeplane.view.swing.map.MapView
 import org.freeplane.view.swing.map.MapViewScrollPane
 
+import javax.swing.event.ChangeListener
+
 import javax.swing.*
 import javax.swing.event.CellEditorListener
 import javax.swing.event.ChangeEvent
@@ -180,8 +183,17 @@ import java.util.List
  ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ User settings ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
 */
 
+// Merge panel variables
+@Field JDialog mergePanel = null
+@Field JTextField sourceField = null
+@Field JTextField targetField = null
+@Field JButton mergeButton = null
+@Field JComboBox<String> modeCombo = null
+
+@Field boolean isMergePanelOpen = false
+@Field int selectionStep = 1
 @Field String panelTextFontName = "Dialog"
-@Field int panelTextFontSize = 14
+@Field int panelTextFontSize = 25
 
 @Field int retractedWidthFactor = 20
 @Field int expandedWidthFactor = 4
@@ -199,14 +211,9 @@ import java.util.List
 @Field int resizeAnimationStepMs = 15
 @Field int resizeAnimationMaxRows = 80
 
-// Fill the panel's body with the map's own background instead of letting the map show through.
-// It looks almost the same (same colour) and it is MUCH cheaper: a transparent component makes
-// every repaint of itself climb to the nearest opaque ancestor -- the map pane -- so filtering,
-// hovering or re-counting repainted the WHOLE MAP underneath. Set to false to get the old
-// see-through body back.
-@Field boolean opaquePanelBody = true
+//@Field TagRow hoveredRow = null
 
-@Field int titleBarHeight = 24
+@Field int titleBarHeight = 35
 @Field String titleBarText = "Tags"
 
 // Usage count next to each tag (issue #2948): "urgent (5)". A category that has subtags
@@ -215,7 +222,7 @@ import java.util.List
 @Field boolean showUsageCounts = true
 @Field boolean showCategoryTotals = true
 // faded look of an unused tag: how far its chip color is pulled toward the map background
-@Field float unusedTagFadeRatio = 0.72f
+@Field float unusedTagFadeRatio = 0.42f
 
 // Highlight of the typed text inside each row (#2926). Amber with black text: the chip
 // underneath can be any color, so the pair has to carry its own contrast.
@@ -234,7 +241,7 @@ import java.util.List
 @Field String wideOnSymbol = "»"
 @Field String closeButtonSymbol = "✕"
 @Field String clearButtonSymbol = "⌫"
-@Field int widthOfTheClearButton = 30
+@Field int widthOfTheClearButton = 40
 
 @Field String filterFieldPlaceholder = "Filter or create…"
 
@@ -270,6 +277,15 @@ import java.util.List
  ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑ User settings ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 */
 
+
+@Field JDialog fastChildPanel = null
+@Field JTextField fastParentField = null
+@Field JButton fastAddButton = null
+@Field JLabel fastStatusLabel = null
+@Field boolean fastChildPanelOpen = false
+@Field boolean fastWaitingForParent = false
+@Field int fastRemoveDelayMs = 1
+@Field JTextField fastChildNameField = null
 
 @Field final String PANEL_NAME = "UnifiedTagPanel"
 @Field final String FILTER_FIELD_NAME = "UnifiedTagPanelField"
@@ -330,13 +346,15 @@ import java.util.List
 @Field DefaultMutableTreeNode treeRootNode
 @Field JScrollPane treeScrollPane
 @Field JLabel statusLabel
-// what a click on the status bar does, when the message is an offer rather than a report
-@Field Closure statusAction = null
 @Field JButton wideButton
-@Field JButton editModeButton
+
 @Field JButton filterModeButton
 @Field DefaultCellEditor treeCellEditor
 @Field JTextField renameEditorField
+
+// Click Locator variables
+@Field final String CLICK_LOCATOR_KEY = "UnifiedTagPanelClickLocator"
+@Field AWTEventListener tagClickLocatorListener = null
 
 @Field Timer retractTimer
 @Field Timer resizeAnimationTimer
@@ -376,12 +394,15 @@ import java.util.List
 @Field boolean usageCountsStale = true
 @Field boolean hideUnusedTags = false
 
-// two-press delete — the KEYBOARD path only (the menu acts at once)
+@Field boolean locateFromMap = false
 @Field String armedDeleteQn = null
 @Field long armedDeleteAt = 0L
 
 // row being renamed via F2 (the cell editor commits into it)
 @Field Object renamingRow = null
+@Field boolean selectionFromMap = false
+@Field final String LISTENER_KEY = "UnifiedTagPanelClickLocator"
+@Field AWTEventListener clickLocatorListener = null
 
 // row being dragged (edit mode only); the flavor marks our own transfers
 @Field Object draggedRow = null
@@ -394,14 +415,12 @@ import java.util.List
 @Field Font cachedItemFont
 @Field final Map<Character, Character> accentFoldCache = new java.util.concurrent.ConcurrentHashMap<Character, Character>()
 
-// glyph markers, replaced by fallbacks at startup if the font lacks them
 @Field String markAll = "✓"
 @Field String markSome = "◐"
-@Field String editSymbol = "✎"
 @Field String favoriteSymbol = "★"
 
 
-// row payload for the tree. Top-level class: keep it dumb (no access to script methods).
+// Row payload for the tree. Top-level class: keep it dumb (no access to script methods).
 class TagRow {
     String name            // leaf segment (or header text for synthetic rows)
     String qualifiedName   // full qualified content; null for synthetic rows
@@ -417,7 +436,10 @@ class TagRow {
 // TagFavoritesPanel carries; every Dimension read is cast because Groovy resolves
 // .width/.height to the double-returning getters.)
 class WrapLayout extends FlowLayout {
-    WrapLayout(int align, int hgap, int vgap) { super(align, hgap, vgap) }
+    WrapLayout(int align, int hgap, int vgap) { 
+        super(align, hgap, vgap)
+        // remove setComponentOrientation - this method does not exist in FlowLayout
+    }
 
     @Override
     Dimension preferredLayoutSize(Container target) { return layoutSize(target, true) }
@@ -530,9 +552,9 @@ filterDebounceTimer.setRepeats(false)
 loadPanelPreferences()
 createTagPanel()
 loadFavorites()
-restoreViewState()     // resume the hidden panel's expansion / filter / modes
+restoreViewState()
 startListeners()
-refreshTree()          // builds the tree AND the favorites strip
+refreshTree()
 updateAssignedMarks()
 
 return
@@ -559,7 +581,7 @@ boolean hidePanelIfOpen() {
     Object closer = boundScrollPane.getClientProperty(CLOSE_HANDLE_KEY)
 
     if (existingPanel != null && closer != null) {
-        closer.call()   // the closer of the round that opened it — it stashes the view state
+        closer.call()
         return true
     }
 
@@ -567,8 +589,6 @@ boolean hidePanelIfOpen() {
     return false
 }
 
-// Carries the look of the panel across a hide/show cycle. The @Fields die with each run, so
-// the state rides on the scroll pane — the same place (and lifetime) as the closer.
 void disposeOptionsDialog() {
     Object dialog = boundScrollPane.getClientProperty(OPTIONS_DIALOG_KEY)
     if (dialog instanceof JDialog) ((JDialog) dialog).dispose()
@@ -579,7 +599,6 @@ void stashViewState() {
     boundScrollPane.putClientProperty(VIEW_STATE_KEY, [
             expanded  : new LinkedHashSet<String>(expandedQns),
             wide      : wideMode,
-            edit      : editMode,
             hideUnused: hideUnusedTags,
             filter    : filterField != null ? filterField.getText() : ""
     ])
@@ -597,7 +616,6 @@ void restoreViewState() {
     firstBuildDone = true
 
     hideUnusedTags = state.hideUnused as boolean
-    if (state.edit as boolean) toggleEditMode()
     if (state.wide as boolean) toggleWideMode()
 
     String text = String.valueOf(state.filter ?: "")
@@ -647,12 +665,11 @@ Component findByName(Container container, String name) {
 void purgePanelArtifacts() {
     Object previousCloser = boundScrollPane.getClientProperty(CLOSE_HANDLE_KEY)
     if (previousCloser != null) previousCloser.call()
-    disposeOptionsDialog()   // a zombie round may have left one open
+    disposeOptionsDialog()
 
     overlayHost.components
             .findAll { it.name == PANEL_NAME }
             .each { overlayHost.remove(it) }
-    // a panel left behind by a round that hung it on the old host (the scroll pane)
     boundScrollPane.components
             .findAll { it.name == PANEL_NAME }
             .each { boundScrollPane.remove(it) }
@@ -668,16 +685,9 @@ void purgePanelArtifacts() {
     boundScrollPane.repaint()
 }
 
-// the three relays live on the MODE controller (global), not on the tab — closing the
-// TAB does not run closePanel, so each handler self-heals: first event after the view
-// dies removes them. The aliveness test is membership in the view manager's list, not
-// isDisplayable(): a re-dock detaches components transiently and would false-positive.
 boolean panelAlive() {
     if (tagPanel == null) return false
     try {
-        // .is(), never ==: MapView implements Comparable and Groovy's == would say
-        // every view equals every other. Verified fallback: a closed tab's scroll
-        // pane stops being displayable.
         return Controller.currentController.mapViewManager.getMapViews().any { it.is(boundMapView) }
     } catch (Throwable t) {
         return boundScrollPane.isDisplayable()
@@ -705,7 +715,7 @@ void detachGlobalListeners() {
 }
 
 void closePanel() {
-    stashViewState()   // BEFORE anything is torn down: it reads the live widgets
+    stashViewState()
 
     retractTimer.stop()
     refreshTimer.stop()
@@ -715,10 +725,8 @@ void closePanel() {
         resizeAnimationTimer = null
     }
     if (tagTree != null && tagTree.isEditing()) tagTree.cancelEditing()
-    // an options dialog is about THIS panel: it must not outlive it
     disposeOptionsDialog()
 
-    // the filter this panel applied must not outlive its UI
     clearMapFilter(false)
 
     detachGlobalListeners()
@@ -735,10 +743,18 @@ void closePanel() {
         overlayHost.remove(tagPanel)
         tagPanel = null
     }
+    // Remove Click Locator
+    if (tagClickLocatorListener != null) {
+        Toolkit.getDefaultToolkit().removeAWTEventListener(tagClickLocatorListener)
+        tagClickLocatorListener = null
+    }
+    JRootPane anchor = findMainRootPane()
+    if (anchor != null) {
+        anchor.putClientProperty(CLICK_LOCATOR_KEY, null)
+    }
 
     boundScrollPane.putClientProperty(CLOSE_HANDLE_KEY, null)
     boundScrollPane.putClientProperty(SUPPLIER_KEY, null)
-    // VIEW_STATE_KEY deliberately survives: it is what the next opening resumes from
 
     overlayHost.revalidate()
     overlayHost.repaint()
@@ -754,32 +770,30 @@ void startListeners() {
 
     def mapController = Controller.currentModeController.mapController
 
-    // node selection changed anywhere -> recompute the ✓/◐ marks for OUR view's selection
+    // Selection relay definition
     selectionRelay = new PanelSelectionRelay(handler: { ->
-        if (aliveOrDetach()) updateAssignedMarks()
+        if (aliveOrDetach()) {
+            updateAssignedMarks()
+        }
     })
     mapController.addNodeSelectionListener(selectionRelay)
 
-    // category structure or a tag color changed (any UI, undo included) -> refresh the tree
     mapChangeRelay = new PanelMapChangeRelay(
             handler: { MapChangeEvent event ->
                 if (!aliveOrDetach()) return
                 if (!event.map.is(boundMapView.map)) return
                 if (event.property == TagCategories || event.property instanceof Tag) {
-                    // a rename/move rewrites the tags of the nodes: the counts move with them
                     usageCountsStale = true
                     scheduleRefresh()
                 }
             },
             structureHandler: { ->
                 if (!aliveOrDetach()) return
-                usageCountsStale = true   // a tagged node came or went
+                usageCountsStale = true
                 scheduleRefresh()
             })
     mapController.addMapChangeListener(mapChangeRelay)
 
-    // a node's tags changed (assignment from any UI) -> a new tag may have been
-    // registered and the marks may be stale
     nodeChangeRelay = new PanelNodeChangeRelay(handler: { NodeChangeEvent event ->
         if (!aliveOrDetach()) return
         if (event.property == CoreTags) {
@@ -790,7 +804,6 @@ void startListeners() {
     })
     mapController.addNodeChangeListener(nodeChangeRelay)
 
-    // tab switched: with "show on every tab" on, the panel goes along
     viewChangeRelay = new PanelViewChangeRelay(handler: { Component newView ->
         if (!aliveOrDetach()) return
         followToView(newView)
@@ -810,7 +823,6 @@ boolean isFollowTabs() {
     }
 }
 
-// ⚠️ not named set*: see applyCloseAfterInsert
 void applyFollowTabs(boolean enabled) {
     try {
         ResourceController.getResourceController().setProperty(FOLLOW_TABS_KEY, enabled)
@@ -821,10 +833,6 @@ void applyFollowTabs(boolean enabled) {
                        : "The panel stays on this tab")
 }
 
-// Moves the SAME panel to the tab that just became active. Everything the panel is bolted
-// to is per-tab — the overlay host, the reserved-area supplier, the viewport listener, the
-// client properties — so each one has to be handed over. The three relays live on the mode
-// controller instead, and their handlers read boundMapView, so they follow for free.
 void followToView(Component newViewComponent) {
     if (tagPanel == null || !isFollowTabs()) return
     if (!(newViewComponent instanceof MapView)) return
@@ -833,12 +841,11 @@ void followToView(Component newViewComponent) {
 
     MapViewScrollPane newScrollPane =
             SwingUtilities.getAncestorOfClass(MapViewScrollPane, newView) as MapViewScrollPane
-    if (newScrollPane == null) return   // the new view is not anchored yet; stay put
+    if (newScrollPane == null) return
 
-    // leave the tab we are leaving CLEAN: a map filter of ours must not outlive our presence
     clearMapFilter(false)
     if (tagTree != null && tagTree.isEditing()) tagTree.cancelEditing()
-    disposeOptionsDialog()   // it is tied to the old tab's client property
+    disposeOptionsDialog()
 
     Container oldHost = overlayHost
     if (reservedAreaSupplier != null) boundScrollPane.removeReservedAreaSupplier(reservedAreaSupplier)
@@ -863,11 +870,8 @@ void followToView(Component newViewComponent) {
     oldHost.revalidate()
     oldHost.repaint()
 
-    // another map means other tags, other favourites (they live in the .mm) and other counts
     loadFavorites()
     usageCountsStale = true
-    // the remembered expansion is a list of qualified names of the map we just LEFT, so it
-    // would land the new map collapsed. Start it the way opening the panel here would.
     expandedQns.clear()
     firstBuildDone = false
     refreshTree()
@@ -887,11 +891,6 @@ void followToView(Component newViewComponent) {
 void createTagPanel() {
     tagPanel = transparentPanel(new BorderLayout())
     tagPanel.setName(PANEL_NAME)
-    // see opaquePanelBody: this is a performance decision, not a cosmetic one
-    if (opaquePanelBody) {
-        tagPanel.setOpaque(true)
-        tagPanel.setBackground(mapBackground())
-    }
     tagPanel.setBorder(BorderFactory.createLineBorder(panelBorderColor(), panelBorderThickness))
 
     JPanel header = transparentPanel(new BorderLayout())
@@ -907,20 +906,27 @@ void createTagPanel() {
     statusLabel.setOpaque(true)
     statusLabel.setBackground(barColor)
     statusLabel.setForeground(barTextColor())
-    // MOUSE_PRESSED, not MOUSE_CLICKED: the latter is suppressed by a micro-drag
-    statusLabel.addMouseListener(new MouseAdapter() {
+    tagPanel.add(statusLabel, BorderLayout.SOUTH)
+
+    // MouseListener for panel - transfer focus to tree
+    tagPanel.addMouseListener(new MouseAdapter() {
         @Override
-        void mousePressed(MouseEvent event) {
-            Closure action = statusAction
-            if (action != null) action()
+        void mousePressed(MouseEvent e) {
+            // When clicking on the panel (empty area of tree)
+            Component clicked = e.getComponent()
+            if (clicked == tagPanel) {
+                // Transfer focus to tree
+                if (tagTree != null) {
+                    tagTree.requestFocusInWindow()
+                }
+            }
         }
     })
-    tagPanel.add(statusLabel, BorderLayout.SOUTH)
 
     bindKey(tagPanel, JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT,
             KeyEvent.VK_ESCAPE, 0, "closeUnifiedTagPanel", { closePanel() })
 
-    // reorder shortcuts work with either the field or the tree focused
+    // Keyboard shortcuts for reordering (always available, no edit mode needed)
     bindKey(tagPanel, JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT,
             KeyEvent.VK_UP, InputEvent.ALT_DOWN_MASK, "tagMoveUp", { moveSelectedTag('up') })
     bindKey(tagPanel, JComponent.WHEN_ANCESTOR_OF_FOCUSED_COMPONENT,
@@ -932,11 +938,7 @@ void createTagPanel() {
 
     tagPanel.setBounds(0, 0, retractedWidth(), 10)
 
-    // no constraint, ON PURPOSE: the MapViewPane's layout only lays out constrained
-    // children, so ours keeps the bounds we set by hand — the same contract the Map
-    // Overview uses. (On the scroll-pane fallback the layout ignores it just as well.)
     overlayHost.add(tagPanel)
-    // add() puts the component BEHIND its siblings; z-order 0 = painted last = in front
     overlayHost.setComponentZOrder(tagPanel, 0)
 
     reservedAreaSupplier = { ->
@@ -957,6 +959,9 @@ void createTagPanel() {
         void mouseExited(MouseEvent e) {
             mouseOverPanel = false
             retractTimer.restart()
+            if (boundMapView != null && !popupOpen) {
+                boundMapView.requestFocusInWindow()
+            }
         }
     }
     addHoverListenerRecursively(tagPanel)
@@ -979,7 +984,6 @@ JPanel createTitleBar() {
     title.setFont(new Font(panelTextFontName, Font.BOLD, panelTextFontSize - 2))
     title.setForeground(barForeground)
 
-    editModeButton = createBarButton(editSymbol, barForeground, editModeTooltip(), { toggleEditMode() })
     wideButton = createBarButton(wideOffSymbol, barForeground, wideTooltip(), { toggleWideMode() })
     JButton closeButton = createBarButton(closeButtonSymbol, barForeground, "Close the panel", { closePanel() })
     closeButton.addMouseListener(new MouseAdapter() {
@@ -991,7 +995,6 @@ JPanel createTitleBar() {
     })
 
     JPanel barButtons = transparentPanel(new FlowLayout(FlowLayout.RIGHT, 0, 0))
-    barButtons.add(editModeButton)
     barButtons.add(wideButton)
     barButtons.add(closeButton)
 
@@ -1010,26 +1013,19 @@ JButton createBarButton(String symbol, Color barForeground, String tooltip, Clos
     button.setContentAreaFilled(false)
     button.setBorderPainted(false)
     button.setFocusPainted(false)
-    // the L&F margin leaves negative usable width on a narrow button -> "..."
     button.setMargin(new Insets(0, 0, 0, 0))
     Color hoverBackground = barHoverColor()
     button.addMouseListener(new MouseAdapter() {
         @Override
         void mouseEntered(MouseEvent e) {
             button.setOpaque(true)
-            if (button.getBackground() == null || !button.is(editModeButton) || !editMode) {
-                button.setBackground(hoverBackground)
-            }
+            button.setBackground(hoverBackground)
             button.repaint()
         }
 
         @Override
         void mouseExited(MouseEvent e) {
-            if (button.is(editModeButton) && editMode) {
-                button.setBackground(editModeOnColor)
-            } else {
-                button.setOpaque(false)
-            }
+            button.setOpaque(false)
             button.repaint()
         }
     })
@@ -1041,13 +1037,6 @@ String wideTooltip() {
     return wideMode ? "Restore the normal width" : "Expand to " + wideWidthPercent + "% of the map and pin"
 }
 
-String editModeTooltip() {
-    return editMode ? "Edit mode ON: clicks select, drag reorganizes. Click to go back to assigning."
-                    : "Edit mode: clicks select (no toggling) and drag & drop reorganizes the hierarchy"
-}
-
-// ⚠️ do NOT extract into a set*(arg) method — Groovy would treat it as a property setter
-// and silently skip the body (see SearchPanel's toggleWideMode note)
 void toggleWideMode() {
     wideMode = !wideMode
     wideButton.setText(wideMode ? wideOnSymbol : wideOffSymbol)
@@ -1055,19 +1044,6 @@ void toggleWideMode() {
     fitPanelBounds()
 }
 
-void toggleEditMode() {
-    editMode = !editMode
-    editModeButton.setToolTipText(editModeTooltip())
-    if (editMode) {
-        editModeButton.setOpaque(true)
-        editModeButton.setBackground(editModeOnColor)
-    } else {
-        editModeButton.setOpaque(false)
-    }
-    editModeButton.repaint()
-    showStatus(editMode ? "Edit mode: clicks select, drag & drop reorganizes; assignment off"
-                        : "Assign mode: click toggles the tag")
-}
 
 JPanel createFilterBox() {
     filterField = new JTextField() {
@@ -1094,8 +1070,16 @@ JPanel createFilterBox() {
     filterField.setBorder(BorderFactory.createCompoundBorder(
             filterField.getBorder(), BorderFactory.createEmptyBorder(2, 6, 2, 6)))
 
-    // every keystroke arms the debounce (filterDebounceMs) instead of rebuilding the tree
-    // right away; ENTER and the arrow keys flush whatever it still owes before acting
+    // Click on search box
+    filterField.addMouseListener(new MouseAdapter() {
+        @Override
+        void mouseClicked(MouseEvent e) {
+            if (!filterField.hasFocus()) {
+                filterField.requestFocusInWindow()
+            }
+        }
+    })
+
     filterField.getDocument().addDocumentListener(new DocumentListener() {
         @Override
         void insertUpdate(DocumentEvent e) { onFilterEdited() }
@@ -1115,19 +1099,69 @@ JPanel createFilterBox() {
         void focusLost(FocusEvent e) { retractTimer.restart() }
     })
 
+    // کلیدهای Enter برای ایجاد/اختصاص تگ
     bindKey(filterField, JComponent.WHEN_FOCUSED, KeyEvent.VK_ENTER, 0,
             "assignBestMatch", { commitFieldAction(false) })
     bindKey(filterField, JComponent.WHEN_FOCUSED, KeyEvent.VK_ENTER, InputEvent.CTRL_DOWN_MASK,
             "forceCreateTag", { commitFieldAction(true) })
+
+    // ===== کلیدهای پیمایش نتایج جستجو (وقتی فیلد فوکوس دارد) =====
+    // 1. کلیدهای ساده Up/Down
     bindKey(filterField, JComponent.WHEN_FOCUSED, KeyEvent.VK_DOWN, 0,
             "nextTagRow", { moveTreeSelection(1) })
     bindKey(filterField, JComponent.WHEN_FOCUSED, KeyEvent.VK_UP, 0,
             "previousTagRow", { moveTreeSelection(-1) })
+    
+    // 2. کلیدهای Ctrl+Up/Down (همین کار را انجام میدهند)
+    bindKey(filterField, JComponent.WHEN_FOCUSED, KeyEvent.VK_DOWN, InputEvent.CTRL_DOWN_MASK,
+            "filterSearchNext", { moveTreeSelection(1) })
+    bindKey(filterField, JComponent.WHEN_FOCUSED, KeyEvent.VK_UP, InputEvent.CTRL_DOWN_MASK,
+            "filterSearchPrevious", { moveTreeSelection(-1) })
+
+    // 3. کلیدهای Ctrl+Up/Down در سطح پنجره (برای زمانی که فیلد فوکوس ندارد)
+    bindKey(filterField, JComponent.WHEN_IN_FOCUSED_WINDOW, KeyEvent.VK_DOWN, InputEvent.CTRL_DOWN_MASK,
+            "filterSearchNextGlobal", { moveTreeSelection(1) })
+    bindKey(filterField, JComponent.WHEN_IN_FOCUSED_WINDOW, KeyEvent.VK_UP, InputEvent.CTRL_DOWN_MASK,
+            "filterSearchPreviousGlobal", { moveTreeSelection(-1) })
+
+    // دکمه Add Child Tag (سریع)
+    JButton fastAddChildBtn = new JButton("⚡ Add Child Tag")
+    fastAddChildBtn.setFont(new Font(panelTextFontName, Font.BOLD, panelTextFontSize))
+    fastAddChildBtn.setMargin(new Insets(4, 8, 4, 8))
+    fastAddChildBtn.setFocusPainted(false)
+    fastAddChildBtn.setBackground(new Color(255, 220, 150))
+    fastAddChildBtn.setForeground(new Color(150, 80, 0))
+    fastAddChildBtn.setBorder(BorderFactory.createCompoundBorder(
+        BorderFactory.createLineBorder(new Color(200, 120, 0), 1),
+        BorderFactory.createEmptyBorder(4, 10, 4, 10)
+    ))
+    fastAddChildBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+    fastAddChildBtn.setToolTipText("Add child tag fast (auto-removes after 2s)")
+    fastAddChildBtn.addActionListener({ ActionEvent e -> 
+        openFastChildPanel()
+    } as ActionListener)
+
+    // =====  Merge =====
+    JButton mergeBtn = new JButton("🔀 Merge / Assign")    
+    mergeBtn.setFont(new Font(panelTextFontName, Font.BOLD, panelTextFontSize))
+    mergeBtn.setMargin(new Insets(4, 8, 4, 8))
+    mergeBtn.setFocusPainted(false)
+    mergeBtn.setBackground(new Color(220, 240, 220))
+    mergeBtn.setForeground(new Color(0, 120, 0))
+    mergeBtn.setBorder(BorderFactory.createCompoundBorder(
+        BorderFactory.createLineBorder(new Color(0, 150, 0), 1),
+        BorderFactory.createEmptyBorder(4, 10, 4, 10)
+    ))
+    mergeBtn.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+    mergeBtn.setToolTipText("Open Merge/Assign panel")
+    mergeBtn.addActionListener({ ActionEvent e -> 
+        openMergePanel()
+    } as ActionListener)
 
     JButton clearButton = new JButton(clearButtonSymbol)
     clearButton.setToolTipText("Clear the filter")
     clearButton.setFont(itemFont())
-    clearButton.setPreferredSize(new Dimension(widthOfTheClearButton, 1))
+    clearButton.setPreferredSize(new Dimension(widthOfTheClearButton, 30))
     clearButton.setForeground(barTextColor())
     clearButton.setBackground(barColor)
     clearButton.setContentAreaFilled(false)
@@ -1147,12 +1181,12 @@ JPanel createFilterBox() {
         filterField.requestFocusInWindow()
     } as ActionListener)
 
-    // the mode toggle sits right next to the search box, where #2926 asks for it
+    // Filter Mode button
     filterModeButton = new JButton(isFilterHides() ? filterHidesSymbol : highlightOnlySymbol)
     filterModeButton.setName("UnifiedTagPanelFilterModeButton")
     filterModeButton.setToolTipText(filterModeTooltip())
     filterModeButton.setFont(itemFont())
-    filterModeButton.setPreferredSize(new Dimension(widthOfTheClearButton, 1))
+    filterModeButton.setPreferredSize(new Dimension(widthOfTheClearButton, 30))
     filterModeButton.setForeground(barTextColor())
     filterModeButton.setBackground(barColor)
     filterModeButton.setContentAreaFilled(false)
@@ -1168,10 +1202,8 @@ JPanel createFilterBox() {
     })
     filterModeButton.addActionListener({ ActionEvent e -> applyFilterHides(!isFilterHides()) } as ActionListener)
 
-    // ⚠️ GridLayout, NOT FlowLayout: both buttons declare a preferred size of (width, 1) —
-    // a deliberate lie that works only under a layout that STRETCHES them vertically, which
-    // is what BorderLayout.EAST used to do when the clear button sat there alone. FlowLayout
-    // honours the preferred size and the buttons collapse to 1px, leaving a blank strip.
+    // Place buttons
+       
     JPanel buttons = transparentPanel(new GridLayout(1, 2, 0, 0))
     buttons.add(filterModeButton)
     buttons.add(clearButton)
@@ -1179,8 +1211,10 @@ JPanel createFilterBox() {
     JPanel filterBox = transparentPanel(new BorderLayout())
     filterBox.add(filterField, BorderLayout.CENTER)
     filterBox.add(buttons, BorderLayout.EAST)
+    
     return filterBox
 }
+
 
 /*
  ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Usage counts ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
@@ -1198,7 +1232,6 @@ void ensureUsageCounts() {
     Map<String, Integer> direct = new HashMap<String, Integer>()
     Map<String, Integer> category = new HashMap<String, Integer>()
     String sep = separator()
-    // the CORE reader, not the proxy: building a NodeProxy per node would dominate the cost
     IconController iconController = IconController.getController()
 
     List<NodeModel> stack = new ArrayList<NodeModel>()
@@ -1262,7 +1295,6 @@ boolean isSortByUsage() {
     }
 }
 
-// ⚠️ not named set*: see applyCloseAfterInsert
 void applySortByUsage(boolean enabled) {
     try {
         ResourceController.getResourceController().setProperty(SORT_BY_USAGE_KEY, enabled)
@@ -1272,13 +1304,6 @@ void applySortByUsage(boolean enabled) {
     refreshTree()
 }
 
-// FLAT list, most used first — the categories stop being nesting and become part of each
-// name (the qualified name is the label, or two tags called "done" under different
-// categories would be indistinguishable once the tree is gone).
-//
-// The sort key is the CATEGORY usage, the same number that decides "unused" everywhere else
-// (fading, hiding, the bulk delete). One number governs sorting, fading and hiding — a mode
-// with a private definition of "used" would make those three disagree on screen.
 void buildFlatUsageRows(DefaultMutableTreeNode root, def state, String needle) {
     List<Map> entries = []
     def collect
@@ -1310,7 +1335,6 @@ void buildFlatUsageRows(DefaultMutableTreeNode root, def state, String needle) {
     }
 }
 
-// " (5)" for a leaf; " (2/17)" for a category whose subtags add uses of their own
 String usageSuffix(TagRow row, boolean hasChildren) {
     if (!showUsageCounts || row == null || row.qualifiedName == null) return ""
     int direct = directUsageOf(row.qualifiedName)
@@ -1329,13 +1353,13 @@ String usageSuffix(TagRow row, boolean hasChildren) {
 */
 
 JPanel createFavoritesStrip() {
-    favoritesStrip = transparentPanel(new WrapLayout(FlowLayout.LEFT, favoritesGapX, favoritesGapY))
+    favoritesStrip = transparentPanel(new WrapLayout(FlowLayout.RIGHT, favoritesGapX, favoritesGapY))
     favoritesStrip.setName(FAVORITES_STRIP_NAME)
     favoritesStrip.setBorder(BorderFactory.createMatteBorder(1, 0, 0, 0, panelBorderColor()))
-    favoritesStrip.setVisible(false)   // no favorites yet: no wasted rows
-    // dropping a tag dragged from the tree pins it here (edit mode, where dragging is on).
-    // ⚠️ canImport does NOT require isDrop(): that keeps the handler testable through the
-    // public paste-style TransferSupport constructor, and costs nothing.
+    favoritesStrip.setVisible(false)
+    // Only setComponentOrientation is sufficient
+favoritesStrip.setComponentOrientation(ComponentOrientation.LEFT_TO_RIGHT)
+    
     favoritesStrip.setTransferHandler(new TransferHandler() {
         @Override
         boolean canImport(TransferHandler.TransferSupport support) {
@@ -1352,7 +1376,6 @@ JPanel createFavoritesStrip() {
     return favoritesStrip
 }
 
-// storage of the MAP (persisted in the .mm, like the tags), one qualified name per line
 void loadFavorites() {
     favorites.clear()
     try {
@@ -1368,8 +1391,6 @@ void loadFavorites() {
     }
 }
 
-// only ever called from an explicit user action: writing marks the map modified, and
-// merely opening the panel must not dirty a map
 void saveFavorites() {
     try {
         ProxyFactory.createNode(boundMapView.map.rootNode, null).mindMap.storage[FAVORITES_KEY] = favorites.join("\n")
@@ -1387,7 +1408,7 @@ boolean addFavorite(String qn) {
     favorites.add(qn)
     saveFavorites()
     rebuildFavoritesStrip()
-    remeasureRows([qn])   // the row just grew a ★
+    remeasureRows([qn])
     if (tagTree != null) tagTree.repaint()
     showStatus("'" + qn + "' added to the favorites of this map")
     return true
@@ -1397,7 +1418,7 @@ void removeFavorite(String qn) {
     if (!favorites.remove(qn)) return
     saveFavorites()
     rebuildFavoritesStrip()
-    remeasureRows([qn])   // the ★ is gone; the row is narrower now
+    remeasureRows([qn])
     if (tagTree != null) tagTree.repaint()
     showStatus("'" + qn + "' removed from the favorites")
 }
@@ -1413,9 +1434,6 @@ void moveFavorite(String qn, int delta) {
     rebuildFavoritesStrip()
 }
 
-// keeps the favorites pointing at the right tag after OUR OWN structural edits:
-// newQualifiedName null = the tag was deleted. Prefix match carries the descendants
-// along (a favorite 'a::b::c' follows when 'a::b' is renamed or moved).
 void remapFavorites(String oldQualifiedName, String newQualifiedName) {
     if (oldQualifiedName == null || favorites.isEmpty()) return
     String prefix = oldQualifiedName + separator()
@@ -1450,7 +1468,7 @@ void rebuildFavoritesStrip() {
     favorites.each { String qn -> favoritesStrip.add(favoriteChip(qn)) }
     favoritesStrip.revalidate()
     favoritesStrip.repaint()
-    fitPanelBounds()   // the strip grew or shrank: the panel height follows
+    fitPanelBounds()
 }
 
 JLabel favoriteChip(String qn) {
@@ -1469,7 +1487,6 @@ JLabel favoriteChip(String qn) {
     chip.setToolTipText(known ? qn : qn + " — no longer in this map (clicking recreates it)")
     applyChipText(chip)
 
-    // MOUSE_PRESSED, like the tree: a micro-drag suppresses MOUSE_CLICKED
     chip.addMouseListener(new MouseAdapter() {
         @Override
         void mousePressed(MouseEvent e) {
@@ -1482,16 +1499,13 @@ JLabel favoriteChip(String qn) {
 
         @Override
         void mouseReleased(MouseEvent e) {
-            if (e.isPopupTrigger()) showFavoriteMenu(chip, qn, e)   // Windows fires it here
+            if (e.isPopupTrigger()) showFavoriteMenu(chip, qn, e)
         }
     })
-    // without this the panel would retract as soon as the cursor enters a chip: entering
-    // a child fires mouseExited on the parent
     chip.addMouseListener(hoverListener)
     return chip
 }
 
-// the chip's own ✓/◐ marker, refreshed in place — no component churn on every selection change
 void applyChipText(JLabel chip) {
     String qn = (String) chip.getClientProperty("tagQn")
     String marker = assignedAll.contains(qn) ? markAll + " " : assignedSome.contains(qn) ? markSome + " " : ""
@@ -1507,8 +1521,6 @@ String shortNameOf(String qn) {
 Color colorForQualifiedName(String qn) {
     TagRow row = rowByQn(qn)
     if (row != null) return chipColor(row)
-    // unknown to this map (renamed elsewhere, or map switched): fall back to the color
-    // Freeplane itself would derive from the content
     return new Tag(qn).getColor()
 }
 
@@ -1537,7 +1549,6 @@ void onFilterEdited() {
     filterDebounceTimer.restart()
 }
 
-// applies whatever is in the field right now; returns false when nothing changed
 boolean applyFilterText() {
     filterDebounceTimer.stop()
     String text = filterField.getText().trim()
@@ -1547,11 +1558,10 @@ boolean applyFilterText() {
     return true
 }
 
+
 JComponent createTreeArea() {
     treeRootNode = new DefaultMutableTreeNode(new TagRow(name: "tags", synthetic: true))
     tagTree = new JTree(new DefaultTreeModel(treeRootNode)) {
-        // JTree's default asks visibleRowCount × row height — same trap as JList;
-        // the real preferred size lets fittedHeight() see the whole tree
         @Override
         Dimension getPreferredScrollableViewportSize() {
             return getPreferredSize()
@@ -1560,16 +1570,17 @@ JComponent createTreeArea() {
     tagTree.setRootVisible(false)
     tagTree.setShowsRootHandles(true)
     tagTree.setOpaque(false)
-    tagTree.setRowHeight(0)   // ask the renderer per row
+    tagTree.setRowHeight(0)
     tagTree.setFont(itemFont())
     tagTree.getSelectionModel().setSelectionMode(TreeSelectionModel.SINGLE_TREE_SELECTION)
-    tagTree.setToggleClickCount(0)   // expand only by the handle; double-click is not "expand"
+    tagTree.setToggleClickCount(0)
     tagTree.setCellRenderer(createTagRenderer())
+
+    tagTree.setComponentOrientation(ComponentOrientation.LEFT_TO_RIGHT)
 
     renameEditorField = new JTextField()
     renameEditorField.setFont(itemFont())
     treeCellEditor = new DefaultCellEditor(renameEditorField) {
-        // editing starts ONLY programmatically (F2 / context menu), never from clicks
         @Override
         boolean isCellEditable(java.util.EventObject anEvent) { return anEvent == null }
     }
@@ -1597,8 +1608,62 @@ JComponent createTreeArea() {
         }
     })
 
-    // MOUSE_PRESSED, not CLICKED: a micro-drag between press and release suppresses
-    // CLICKED and the assignment silently misses (see the skill note / SingleClickAssign)
+    // ===== کلیدهای پیمایش معمولی درخت =====
+    bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_DOWN, 0,
+            "treeNextRow", { 
+                int rows = tagTree.getRowCount()
+                if (rows > 0) {
+                    int current = tagTree.getLeadSelectionRow()
+                    int next = current < 0 ? 0 : Math.min(current + 1, rows - 1)
+                    tagTree.setSelectionRow(next)
+                    tagTree.scrollRowToVisible(next)
+                }
+            })
+    bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_UP, 0,
+            "treePreviousRow", { 
+                int rows = tagTree.getRowCount()
+                if (rows > 0) {
+                    int current = tagTree.getLeadSelectionRow()
+                    int prev = current < 0 ? rows - 1 : Math.max(current - 1, 0)
+                    tagTree.setSelectionRow(prev)
+                    tagTree.scrollRowToVisible(prev)
+                }
+            })
+    
+    // ===== کلیدهای Ctrl+Up/Down برای پیمایش نتایج جستجو (وقتی درخت فوکوس دارد) =====
+    bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_DOWN, InputEvent.CTRL_DOWN_MASK,
+            "filterSearchNext", { moveTreeSelection(1) })
+    bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_UP, InputEvent.CTRL_DOWN_MASK,
+            "filterSearchPrevious", { moveTreeSelection(-1) })
+
+    // Alt+directions for moving
+    bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_UP, InputEvent.ALT_DOWN_MASK,
+            "tagMoveUp", { moveSelectedTag('up') })
+    bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_DOWN, InputEvent.ALT_DOWN_MASK,
+            "tagMoveDown", { moveSelectedTag('down') })
+    bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_LEFT, InputEvent.ALT_DOWN_MASK,
+            "tagPromote", { moveSelectedTag('promote') })
+    bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_RIGHT, InputEvent.ALT_DOWN_MASK,
+            "tagDemote", { moveSelectedTag('demote') })
+
+    // Hover on tags (select only, without changing focus)
+    tagTree.addMouseMotionListener(new MouseMotionAdapter() {
+        @Override
+        void mouseMoved(MouseEvent e) {
+            TreePath path = tagTree.getPathForLocation(e.getX(), e.getY())
+            if (path != null) {
+                TagRow row = rowOf(path)
+                if (row != null && !row.synthetic) {
+                    tagTree.setSelectionPath(path)
+                    // ===== فوکوس خودکار روی جدول =====
+                    if (!tagTree.hasFocus()) {
+                        tagTree.requestFocusInWindow()
+                    }
+                }
+            }
+        }
+    })
+
     tagTree.addMouseListener(new MouseAdapter() {
         @Override
         void mousePressed(MouseEvent e) {
@@ -1607,16 +1672,31 @@ JComponent createTreeArea() {
                 return
             }
             if (!SwingUtilities.isLeftMouseButton(e)) return
+            
             TreePath path = tagTree.getPathForLocation(e.getX(), e.getY())
-            if (path == null) return   // expand handle or empty area: let the tree handle it
+            if (path == null) return
             TagRow row = rowOf(path)
             if (row == null || row.synthetic) return
-            if (!editMode) toggleTagOnSelection(row)
+            
+            tagTree.setSelectionPath(path)
+            
+            if (isMergePanelOpen) {
+                selectTagFromTree()
+                return
+            }
+            
+            toggleTagOnSelection(row)
+            
+            if (fastWaitingForParent) {
+                selectFastParentTag()
+            }
         }
-
+        
         @Override
         void mouseReleased(MouseEvent e) {
-            if (e.isPopupTrigger()) showContextMenu(e)   // Windows: popup trigger is on release
+            if (e.isPopupTrigger()) {
+                showContextMenu(e)
+            }
         }
     })
 
@@ -1631,15 +1711,10 @@ JComponent createTreeArea() {
     bindKey(tagTree, JComponent.WHEN_FOCUSED, KeyEvent.VK_DELETE, 0,
             "deleteSelectedTag", { deleteSelectedTag() })
 
-    // drag & drop reorganization, EDIT MODE only (in assign mode a micro-drag would
-    // assign the tag on press and then also start a drag). The handler dies with the
-    // tree, so no closer entry is needed.
     tagDndFlavor = new DataFlavor('application/x-unified-tag-panel; class=java.lang.String', 'UnifiedTagPanel tag')
     tagTree.setDragEnabled(true)
     tagTree.setDropMode(DropMode.ON_OR_INSERT)
     tagTree.setTransferHandler(createTreeDndHandler())
-    // programmatic drop for tests (a real TransferSupport with a DropLocation cannot be
-    // built from outside): same planning + move path the mouse drop takes
     tagTree.putClientProperty('UnifiedTagPanelDropTest', { String draggedQn, String parentQn, Integer childIndex ->
         TagRow dragged = rowByQn(draggedQn)
         TagRow parent = parentQn == null ? null : (parentQn == '::uncategorized::' ? uncategorizedHeaderRow() : rowByQn(parentQn))
@@ -1653,16 +1728,52 @@ JComponent createTreeArea() {
     treeScrollPane.setOpaque(false)
     treeScrollPane.getViewport().setOpaque(false)
     treeScrollPane.setBorder(BorderFactory.createEmptyBorder())
+treeScrollPane.setComponentOrientation(ComponentOrientation.LEFT_TO_RIGHT)
+
+    // ===== MouseListener برای اسکرول پن (فوکوس خودکار هنگام ورود ماوس) =====
+    treeScrollPane.addMouseListener(new MouseAdapter() {
+        @Override
+        void mouseEntered(MouseEvent e) {
+            // ===== وقتی ماوس وارد اسکرول پن می‌شود، فوکوس به جدول =====
+            if (tagTree != null && !tagTree.hasFocus()) {
+                tagTree.requestFocusInWindow()
+            }
+        }
+        
+        @Override
+        void mousePressed(MouseEvent e) {
+            if (tagTree != null) {
+                tagTree.requestFocusInWindow()
+            }
+        }
+    })
+
+    // ===== MouseListener برای ویوپورت (فوکوس خودکار هنگام ورود ماوس) =====
+    treeScrollPane.getViewport().addMouseListener(new MouseAdapter() {
+        @Override
+        void mouseEntered(MouseEvent e) {
+            // ===== وقتی ماوس وارد ویوپورت می‌شود، فوکوس به جدول =====
+            if (tagTree != null && !tagTree.hasFocus()) {
+                tagTree.requestFocusInWindow()
+            }
+        }
+        
+        @Override
+        void mousePressed(MouseEvent e) {
+            if (tagTree != null) {
+                tagTree.requestFocusInWindow()
+            }
+        }
+    })
+
     return treeScrollPane
 }
 
-/*
- ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑ Panel ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
-*/
-
 
 /*
- ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Tree model / rendering ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+ ============================================================================
+ Tree model / rendering
+ ============================================================================
 */
 
 def readState() {
@@ -1677,173 +1788,16 @@ String separator() {
     }
 }
 
-/*
- * A map can carry a NAMELESS tag, and then no tag of that map can be read at all.
- *
- * Freeplane keeps a sentinel tag with empty content (Tag.EMPTY_TAG) that the tag editor uses
- * for the blank row you type into. It can end up registered in a map's tag registry, and from
- * there it is serialized into the .mm like any other uncategorized tag — as a nameless
- * `tagcolor<N>="#000000ff"`. Reopening the map brings it back, and every read of the tag state
- * then dies inside TagCategoryNamePolicy with "path contains blank segment", because
- * TagCategoryStateBuilder builds a TagItem whose path is [""]. It is not the panel failing:
- * the whole public tag API of that map is unusable while the nameless tag is there.
- *
- * ✅ verified on 1.13.x: planting Tag.EMPTY_TAG under the uncategorized node of a COPY of a
- * live map's categories reproduces the exact message, and dropping it makes the read succeed.
- */
-boolean isBlankTagFailure(Throwable t) {
-    String message = t?.getMessage()
-    return message != null && (message.contains("blank segment") || message.contains("must not be blank"))
-}
-
-/** The nameless tags sitting among the map's uncategorized tags — the ones we can drop safely. */
-List<DefaultMutableTreeNode> blankRegistryTagNodes(TagCategories categories) {
-    List<DefaultMutableTreeNode> blanks = []
-    DefaultMutableTreeNode uncategorized = categories.getUncategorizedTagsNode()
-    for (int i = 0; i < uncategorized.getChildCount(); i++) {
-        DefaultMutableTreeNode child = (DefaultMutableTreeNode) uncategorized.getChildAt(i)
-        Object userObject = child.getUserObject()
-        if (userObject instanceof Tag && ((Tag) userObject).getContent().trim().isEmpty()) blanks << child
-    }
-    return blanks
-}
-
-/**
- * The NODES that carry a nameless tag. They are the source of the whole trouble: the registry
- * entry is rebuilt from them on every load, so cleaning the registry alone fixes the map only
- * until it is reopened. ✅ measured: a node saved with TAGS="&#xa;planilha" re-registers the
- * empty tag when the .mm is read back.
- */
-List<NodeModel> nodesWithBlankTags(MapModel map) {
-    List<NodeModel> found = []
-    Closure visit = null
-    visit = { NodeModel node ->
-        if (IconController.getController().getTags(node).any { it.getContent().trim().isEmpty() }) {
-            found << node
-        }
-        node.getChildren().each { visit(it) }
-    }
-    visit(map.getRootNode())
-    return found
-}
-
-/** Removes every nameless tag, from the registry AND from the nodes. Asks first: it changes the map. */
-void repairBlankRegistryTags() {
-    MapModel map = boundMapView.map
-    TagCategories categories
-    List<DefaultMutableTreeNode> blanks
-    List<NodeModel> taggedNodes
-    try {
-        categories = map.getIconRegistry().getTagCategories()
-        blanks = blankRegistryTagNodes(categories)
-        taggedNodes = nodesWithBlankTags(map)
-    } catch (Throwable t) {
-        showStatus("Could not inspect the tag registry: " + t.getMessage())
-        return
-    }
-    if (blanks.isEmpty() && taggedNodes.isEmpty()) {
-        showStatus("No nameless tag left in this map")
-        refreshTree()
-        return
-    }
-
-    String nodePart = ""
-    if (!taggedNodes.isEmpty()) {
-        nodePart = "\n" + taggedNodes.size() + " node" + (taggedNodes.size() == 1 ? "" : "s") +
-                " actually carry one, and they are cleaned too — otherwise\n" +
-                "the registry entry comes back the next time the map is opened."
-    }
-    int answer = JOptionPane.showConfirmDialog(tagPanel,
-            "This map carries " + blanks.size() + " nameless tag" +
-            (blanks.size() == 1 ? "" : "s") + " in its tag registry, and that\n" +
-            "makes Freeplane refuse to read the tags of the whole map." + nodePart + "\n\n" +
-            "Remove it?\n" +
-            "No node loses a tag that has a name, one Ctrl+Z undoes the whole\n" +
-            "repair, and the map has to be saved for it to stick.",
-            "Repair the tag registry", JOptionPane.OK_CANCEL_OPTION, JOptionPane.WARNING_MESSAGE)
-    if (answer != JOptionPane.OK_OPTION) return
-
-    try {
-        // the nodes first: setTags re-registers what is left, so the registry pass below sees
-        // the final picture
-        int cleanedNodes = 0
-        taggedNodes.each { NodeModel node ->
-            List<Tag> kept = IconController.getController().getTags(node)
-                    .findAll { !it.getContent().trim().isEmpty() }
-            IconController.getController().setTags(node, kept, false)
-            cleanedNodes++
-        }
-
-        TagCategories repaired = map.getIconRegistry().getTagCategories().copy()
-        DefaultMutableTreeNode uncategorized = repaired.getUncategorizedTagsNode()
-        int removed = 0
-        for (int i = uncategorized.getChildCount() - 1; i >= 0; i--) {
-            DefaultMutableTreeNode child = (DefaultMutableTreeNode) uncategorized.getChildAt(i)
-            Object userObject = child.getUserObject()
-            if (userObject instanceof Tag && ((Tag) userObject).getContent().trim().isEmpty()) {
-                uncategorized.remove(i)
-                removed++
-            }
-        }
-        // MIconController.setTagCategories wraps the swap in an IActor, so the repair is a
-        // normal undo step and marks the map unsaved
-        if (removed > 0) IconController.getController().setTagCategories(map, repaired)
-
-        String nodeSuffix = ""
-        if (cleanedNodes > 0) {
-            nodeSuffix = " and from " + cleanedNodes + " node" + (cleanedNodes == 1 ? "" : "s")
-        }
-        showStatus("Removed the nameless tag from the registry" + nodeSuffix +
-                " — save the map to keep the repair")
-        refreshTree()
-    } catch (Throwable t) {
-        showStatus("Repair failed: " + t.getMessage())
-    }
-}
-
-/** Single place where a failed read is turned into a message — actionable when we can fix it. */
-void reportReadFailure(Throwable t) {
-    if (isBlankTagFailure(t)) {
-        int blanks = 0
-        try {
-            blanks = blankRegistryTagNodes(boundMapView.map.getIconRegistry().getTagCategories()).size()
-        } catch (Throwable ignored) {
-        }
-        if (blanks > 0) {
-            showActionableStatus(
-                    "This map has " + blanks + " nameless tag" + (blanks == 1 ? "" : "s") + " — click to repair",
-                    "Freeplane cannot read the tags of a map whose registry holds a tag with an empty"
-                            + " name. Click to remove it (undoable).",
-                    { repairBlankRegistryTags() })
-            return
-        }
-    }
-    showStatus("Could not read tags: " + t.getMessage())
-}
-
 void refreshTree() {
     refreshTree(false)
 }
 
-/**
- * Rebuilds the whole tree from the live map state, keeping expansion, selection and filter.
- *
- * force=true rebuilds even with an inline rename open (cancelling it) — for the callers that
- * are themselves finishing that rename.
- */
 void refreshTree(boolean force) {
     if (tagPanel == null || tagTree == null) return
-    // never swap the model under an ACTIVE drag: the UI keeps repainting the drop line
-    // from paths of the old model (same NPE as the importData note). Retry after.
     if (tagTree.getDropLocation() != null) {
         scheduleRefresh()
         return
     }
-    // ⚠️ Nor under an inline rename: the refresh that lands here is usually OUR OWN edit coming
-    // back through the map-change relay, and cancelling the editor made `Insert` unusable —
-    // it created the tag, opened the rename, and ~150 ms later (refreshCoalesceMs) the editor
-    // vanished before anyone could type, leaving the tag called "new tag". Postpone instead,
-    // exactly like the drag guard above; when the edit ends, the retry finds a quiet tree.
     if (tagTree.isEditing()) {
         if (!force) {
             scheduleRefresh()
@@ -1852,28 +1806,31 @@ void refreshTree(boolean force) {
         tagTree.cancelEditing()
     }
 
+    // Save previous selection
+    String oldSelectedQn = null
+    TreePath oldSelection = tagTree.getSelectionPath()
+    if (oldSelection != null) {
+        TagRow oldRow = rowOf(oldSelection)
+        if (oldRow != null && oldRow.qualifiedName != null) {
+            oldSelectedQn = oldRow.qualifiedName
+        }
+    }
+
     def state
     try {
         state = readState()
     } catch (Throwable t) {
-        reportReadFailure(t)
+        showStatus("Could not read tags: " + t.getMessage())
         return
     }
 
-    // before building: the rows read the counts (and "hide unused" filters by them)
     ensureUsageCounts()
 
-    String selectedQn = selectedRow()?.qualifiedName
     String needle = foldAccents(filterText.toLowerCase())
-
-    // In highlight-only mode NOTHING is pruned by the text — the structure stays whole and
-    // the matches are merely painted. The needle still drives matching, counting, the
-    // arrows and the highlight; it just stops deciding who is visible.
     String pruningNeedle = isFilterHides() ? needle : ""
 
     DefaultMutableTreeNode newRoot = new DefaultMutableTreeNode(new TagRow(name: "tags", synthetic: true))
     if (isSortByUsage()) {
-        // no nesting and no "uncategorized" header: in this mode everything is one flat list
         buildFlatUsageRows(newRoot, state, pruningNeedle)
     } else {
         state.categories.each { cat ->
@@ -1901,29 +1858,56 @@ void refreshTree(boolean force) {
     treeRootNode = newRoot
     ((DefaultTreeModel) tagTree.getModel()).setRoot(newRoot)
 
-    // counted AFTER the tree is built, and only the rows that MATCH: an ancestor category
-    // is on screen to show where a nested match lives, not as a result of its own. Same
-    // predicate the arrow keys use, so "N tags match" is exactly how many the arrows stop on.
     int shown = countMatchingRows(newRoot)
 
     if (!firstBuildDone) {
         firstBuildDone = true
-        collectAllCategoryQns(newRoot)   // first opening: everything expanded
+        collectAllCategoryQns(newRoot)
     }
     restoreExpansion(needle)
-    if (selectedQn != null) selectRowByQn(selectedQn)
-
-    // under a filter, park the selection on the first MATCH — it is what ENTER will take
-    // and where the arrows start, so the target is visible instead of implicit. The
-    // previous selection is kept when it still matches (typing another letter must not
-    // yank the choice away from the tag the user had already arrowed to).
-    if (!needle.isEmpty() && !rowMatchesFilter(selectedRow())) {
-        int first = firstNavigableRow()
-        if (first >= 0) {
-            tagTree.setSelectionRow(first)
-            tagTree.scrollRowToVisible(first)
+    
+    // Restore previous selection if it exists
+    if (oldSelectedQn != null) {
+        DefaultMutableTreeNode node = findNodeByQn(treeRootNode, oldSelectedQn)
+        if (node != null) {
+            TreePath path = new TreePath(node.getPath())
+            // Expand parent path
+            TreePath parentPath = path.getParentPath()
+            if (parentPath != null && parentPath.getPathCount() > 1) {
+                tagTree.expandPath(parentPath)
+            }
+            tagTree.setSelectionPath(path)
+            tagTree.scrollPathToVisible(path)
         } else {
-            tagTree.clearSelection()
+            // If the previous tag no longer exists, select the first row
+            if (!needle.isEmpty()) {
+                int first = firstNavigableRow()
+                if (first >= 0) {
+                    tagTree.setSelectionRow(first)
+                    tagTree.scrollRowToVisible(first)
+                }
+            } else {
+                // If no filter, select the first visible row
+                if (tagTree.getRowCount() > 0) {
+                    tagTree.setSelectionRow(0)
+                }
+            }
+        }
+    } else {
+        // If filter is active and no row is selected, select the first row
+        if (!needle.isEmpty()) {
+            int first = firstNavigableRow()
+            if (first >= 0) {
+                if (!selectionFromMap) {
+                    tagTree.setSelectionRow(first)
+                    tagTree.scrollRowToVisible(first)
+                }
+            }
+        } else {
+            // If no filter, select the first row (if no row is selected)
+            if (tagTree.getSelectionCount() == 0 && tagTree.getRowCount() > 0) {
+                tagTree.setSelectionRow(0)
+            }
         }
     }
 
@@ -1943,17 +1927,13 @@ void refreshTree(boolean force) {
         showStatus(total + " tags")
     }
 
-    // colors and "still exists?" of the chips are read from the tree rows: rebuild after it
     rebuildFavoritesStrip()
     updateAssignedMarks()
     fitPanelBounds()
 }
 
-// include a category if its qualified name matches (the whole subtree inherits the
-// match through the qualified prefix) or if any descendant matches
 DefaultMutableTreeNode buildCategoryNode(def cat, String needle) {
     boolean selfMatches = needle.isEmpty() || foldAccents(cat.qualifiedName.toLowerCase()).contains(needle)
-    // "hide unused" prunes by the CATEGORY count, so a used subtag keeps its parents visible
     if (hideUnusedTags && categoryUsageOf(cat.qualifiedName) == 0) return null
 
     List<DefaultMutableTreeNode> children = []
@@ -2003,9 +1983,6 @@ int countUnusedTags(def state) {
     return count
 }
 
-// every tag nobody uses, TOP-MOST first: an unused category has only unused descendants
-// (its count already includes them), so deleting the top removes the branch in one go —
-// and passing both a parent and its child in the same request would break on the child.
 List<Map> unusedTagsToDelete(def state) {
     List<Map> found = []
     state.uncategorizedTags.each { item ->
@@ -2019,7 +1996,7 @@ List<Map> unusedTagsToDelete(def state) {
         if (categoryUsageOf(cat.qualifiedName) == 0) {
             found.add([path: new ArrayList<String>(cat.path), qn: cat.qualifiedName, uncategorized: false])
         } else {
-            stack.addAll(cat.children)   // a used category may still hide unused subtags
+            stack.addAll(cat.children)
         }
     }
     return found
@@ -2035,8 +2012,6 @@ void collectAllCategoryQns(DefaultMutableTreeNode node) {
 }
 
 void restoreExpansion(String needle) {
-    // filtering: the tree holds only matches + the path down to them, so expanding
-    // everything IS revealing them (FilterableJTree's known limitation is exactly not doing this)
     if (!needle.isEmpty() && isFilterHides()) {
         int i = 0
         while (i < tagTree.getRowCount()) {
@@ -2047,11 +2022,7 @@ void restoreExpansion(String needle) {
     }
 
     expandMatching(treeRootNode)
-    // highlight-only: nothing was hidden, but a match inside a collapsed branch would still
-    // be invisible. Open ONLY the paths leading to a match — the rest of the structure is
-    // left exactly as the user had it, which is the point of this mode.
     if (!needle.isEmpty()) revealMatchAncestors(treeRootNode)
-    // the synthetic uncategorized bucket stays always expanded
     for (int i = 0; i < treeRootNode.getChildCount(); i++) {
         DefaultMutableTreeNode child = (DefaultMutableTreeNode) treeRootNode.getChildAt(i)
         TagRow row = (TagRow) child.getUserObject()
@@ -2059,8 +2030,6 @@ void restoreExpansion(String needle) {
     }
 }
 
-// expands the ancestors of every matching row, top-down (expanding a node whose own parent
-// is still collapsed would record the state but leave the row off screen)
 void revealMatchAncestors(DefaultMutableTreeNode node) {
     for (int i = 0; i < node.getChildCount(); i++) {
         DefaultMutableTreeNode child = (DefaultMutableTreeNode) node.getChildAt(i)
@@ -2113,6 +2082,12 @@ DefaultMutableTreeNode findNodeByQn(DefaultMutableTreeNode from, String qn) {
 }
 
 void selectRowByQn(String qn) {
+    // Only if from Locate or from tree click
+    // If selectionFromMap == true, do nothing
+    if (selectionFromMap && !locateFromMap) {
+        return
+    }
+    
     DefaultMutableTreeNode node = findNodeByQn(treeRootNode, qn)
     if (node == null) return
     TreePath path = new TreePath(node.getPath())
@@ -2121,13 +2096,7 @@ void selectRowByQn(String qn) {
     tagTree.scrollPathToVisible(path)
 }
 
-// Down/Up walk ONLY the tags that match what was typed. An ancestor category is on screen
-// merely to show where a match lives (filtering "thammy" still draws ProjetosEspecíficos >
-// Híbrido above it); stopping on those would make the type-arrow-Enter flow land on the
-// wrong tag. Wraps around at both ends.
 void moveTreeSelection(int delta) {
-    // typing and hitting Down right away must not walk the PREVIOUS tree: flush whatever
-    // the debounce still owes, exactly as ENTER does
     applyFilterText()
 
     int rows = tagTree.getRowCount()
@@ -2146,17 +2115,11 @@ void moveTreeSelection(int delta) {
         }
         candidate = wrapped + step
     }
-    // nothing to land on (only headers/non-matching ancestors): leave the selection alone
 }
-
 boolean isNavigableRow(int rowIndex) {
     return rowMatchesFilter(rowOf(tagTree.getPathForRow(rowIndex)))
 }
 
-// A row "matches" when the typed text is inside its QUALIFIED name — the same test that
-// built the tree, so what is navigable is exactly what the filter selected. With no filter
-// every real tag matches. (Note a category whose name contains the text matches too, and
-// so do all of its subtags, since the text is in their qualified name as well.)
 boolean rowMatchesFilter(TagRow row) {
     if (row == null || row.synthetic || row.qualifiedName == null) return false
     String needle = foldAccents(filterText.toLowerCase())
@@ -2172,7 +2135,6 @@ boolean isFilterHides() {
     }
 }
 
-// ⚠️ not named set*: see applyCloseAfterInsert
 void applyFilterHides(boolean hides) {
     try {
         ResourceController.getResourceController().setProperty(FILTER_HIDES_KEY, hides)
@@ -2192,10 +2154,6 @@ String filterModeTooltip() {
             : "Highlighting only: every tag stays visible. Click to hide what does not match."
 }
 
-// Every occurrence of the typed text inside `text`, as [start, end) pairs. The ranges come
-// from the FOLDED lowercase text, which by contract has the same length as the original
-// (see foldAccents) — so they paint the original directly: typing "coracao" highlights
-// "coração", accents and all.
 List<int[]> matchRangesIn(String text, String foldedNeedle) {
     List<int[]> ranges = []
     if (foldedNeedle.isEmpty()) return ranges
@@ -2208,12 +2166,6 @@ List<int[]> matchRangesIn(String text, String foldedNeedle) {
     return ranges
 }
 
-// The row's own text with the matches wrapped in a highlight span; null when there is
-// nothing to highlight, so the common case stays a plain (cheap) label.
-//
-// ⚠️ A row can be on screen because an ANCESTOR matched (filtering "agenda" shows
-// "agenda::com data", whose own name holds no "agenda"). Those rows get no highlight, and
-// that is right: the highlight sits on the segment that actually matched.
 String highlightedFragment(String text) {
     String needle = foldAccents(filterText.toLowerCase())
     if (needle.isEmpty()) return null
@@ -2233,7 +2185,6 @@ String highlightedFragment(String text) {
     return html.toString()
 }
 
-// the first row the arrows would land on, top down (-1 = none)
 int firstNavigableRow() {
     for (int i = 0; i < tagTree.getRowCount(); i++) {
         if (isNavigableRow(i)) return i
@@ -2244,23 +2195,6 @@ int firstNavigableRow() {
 TreeCellRenderer createTagRenderer() {
     JLabel label = new JLabel()
     label.setOpaque(true)
-    // ⚠️ A JTree paints its rows through a CellRendererPane, which ADDS the component to itself to
-    // paint it and REMOVES it afterwards. Entering and leaving a container fires
-    // "graphicsConfiguration", and BasicLabelUI answers that by REBUILDING the HTML view from
-    // scratch -- so every filtered row (the ones that carry <span> highlights) re-parsed its HTML
-    // on every repaint. Ignoring that one property keeps the parsed view alive. Measured elsewhere
-    // on a 286-row list of HTML cells: 1180 ms -> 11,5 ms per repaint.
-    // Trade-off: if the label moved to a screen with a different graphics configuration, its HTML
-    // would not be re-created for it.
-    label.setUI(new javax.swing.plaf.basic.BasicLabelUI() {
-        @Override
-        void propertyChange(java.beans.PropertyChangeEvent event) {
-            if ("graphicsConfiguration" == event.getPropertyName()) return
-            super.propertyChange(event)
-        }
-    })
-    // one border per colour instead of two fresh Border objects per row per repaint
-    Map<List, javax.swing.border.Border> borderCache = [:]
     return new TreeCellRenderer() {
         @Override
         Component getTreeCellRendererComponent(JTree tree, Object value, boolean isSelected,
@@ -2269,70 +2203,79 @@ TreeCellRenderer createTagRenderer() {
                     && ((DefaultMutableTreeNode) value).getUserObject() instanceof TagRow)
                     ? (TagRow) ((DefaultMutableTreeNode) value).getUserObject() : null
 
-            label.setFont(itemFont())
+            // Simplify: use a single JLabel for the entire row
+            JLabel tagLabel = new JLabel()
+            tagLabel.setOpaque(true)
+            tagLabel.setFont(itemFont())
+            tagLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+
+            Color bgColor = mapBackground()
 
             if (row == null || row.synthetic) {
-                // section header: plain text, readable against the panel body, which carries the
-                // map's own background (transparent before opaquePanelBody, the same colour after)
-                label.setOpaque(false)
-                label.setText(row == null ? String.valueOf(value) : row.name)
-                label.setToolTipText(null)   // the label is shared; without this it keeps the previous row's
-                label.setForeground(UITools.getTextColorForBackground(mapBackground()))
-                label.setFont(itemFont().deriveFont(Font.ITALIC, (float) (panelTextFontSize - 2)))
-                label.setBorder(BorderFactory.createEmptyBorder(2, 2, 2, 2))
-                return label
+                tagLabel.setOpaque(false)
+                tagLabel.setText(row == null ? String.valueOf(value) : row.name)
+                tagLabel.setToolTipText(null)
+                tagLabel.setForeground(UITools.getTextColorForBackground(mapBackground()))
+                tagLabel.setFont(itemFont().deriveFont(Font.ITALIC, (float) (panelTextFontSize - 2)))
+                tagLabel.setBorder(BorderFactory.createEmptyBorder(2, 6, 2, 6))
+                return tagLabel
             }
 
             boolean hasChildren = value instanceof DefaultMutableTreeNode &&
                     ((DefaultMutableTreeNode) value).getChildCount() > 0
             boolean unused = isTagUnused(row.qualifiedName)
 
-            // an unused tag fades into the map instead of shouting in full color (#2948)
             Color chip = chipColor(row)
             if (unused && showUsageCounts) chip = blendColors(chip, mapBackground(), unusedTagFadeRatio)
 
             String marker = assignedAll.contains(row.qualifiedName) ? markAll + " "
                     : assignedSome.contains(row.qualifiedName) ? markSome + " " : ""
             String star = isFavorite(row.qualifiedName) ? favoriteSymbol : ""
-            label.setOpaque(true)
-            label.setBackground(chip)
-            label.setForeground(UITools.getTextColorForBackground(chip))
+            
+            tagLabel.setBackground(chip)
+            
+            Color textColor = UITools.getTextColorForBackground(chip)
+            if (isSelected) {
+                float brightness = (chip.getRed() * 0.299f + chip.getGreen() * 0.587f + chip.getBlue() * 0.114f) / 255f
+                textColor = brightness > 0.5f ? Color.BLACK : Color.WHITE
+            }
+            tagLabel.setForeground(textColor)
+            
             String prefix = star + marker
             String suffix = usageSuffix(row, hasChildren)
             String highlighted = highlightedFragment(row.name)
             if (highlighted == null) {
-                label.setText(prefix + row.name + suffix)
+                tagLabel.setText(prefix + row.name + suffix)
             } else {
-                // only the rows that actually match pay for HTML
-                label.setText("<html>" + HtmlUtils.toXMLEscapedText(prefix) + highlighted
+                tagLabel.setText("<html>" + HtmlUtils.toXMLEscapedText(prefix) + highlighted
                         + HtmlUtils.toXMLEscapedText(suffix) + "</html>")
             }
-            label.setToolTipText(usageTooltip(row, hasChildren))
+            tagLabel.setToolTipText(usageTooltip(row, hasChildren))
 
             boolean armed = row.qualifiedName != null && row.qualifiedName.equals(armedDeleteQn)
-            Color edge = armed ? Color.RED
-                    : isSelected ? UITools.getTextColorForBackground(mapBackground())
-                    : chip
-            // ⚠️ ALWAYS 2px: only the COLOUR may depend on selection. A thicker border for
-            // the selected row grows the label by 2px, and the tree had measured that row
-            // while it was unselected — so selecting it clipped its own text with an
-            // ellipsis. A highlight must never change the layout; when unselected the
-            // border is painted in the chip's own colour and simply disappears.
-            def cachedBorder = borderCache.get([edge.getRGB()])
-            if (cachedBorder == null) {
-                cachedBorder = BorderFactory.createCompoundBorder(
-                        BorderFactory.createLineBorder(edge, 2),
-                        BorderFactory.createEmptyBorder(1, 5, 1, 5))
-                borderCache.put([edge.getRGB()], cachedBorder)
+            
+            // Simplify: use a single Border for the entire row
+            if (isSelected) {
+                Color selectionBorder = new Color(0, 180, 0, 200)
+                tagLabel.setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createLineBorder(selectionBorder, 3),
+                        BorderFactory.createEmptyBorder(2, 8, 2, 8)))
+                tagLabel.setBackground(blendColors(chip, new Color(0, 255, 0), 0.08f))
+            } else if (armed) {
+                tagLabel.setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createLineBorder(Color.RED, 2),
+                        BorderFactory.createEmptyBorder(1, 8, 1, 8)))
+            } else {
+                tagLabel.setBorder(BorderFactory.createCompoundBorder(
+                        BorderFactory.createLineBorder(chip, 2),
+                        BorderFactory.createEmptyBorder(1, 8, 1, 8)))
             }
-            label.setBorder(cachedBorder)
-            return label
+            
+            return tagLabel
         }
     }
 }
 
-// tag color composited over the map background when it carries alpha; opaque label
-// with a translucent background would render artifacts
 Color chipColor(TagRow row) {
     Color raw = parseTagColor(row.colorHex, row.qualifiedName ?: row.name)
     if (raw.getAlpha() == 255) return raw
@@ -2371,6 +2314,63 @@ List<String> tagsOf(NodeModel nodeModel) {
     return ProxyFactory.createNode(nodeModel, null).getTags().getTags()
 }
 
+// Add to Assigning section
+void updateTreeSelectionFromMap() {
+    if (tagTree == null || treeRootNode == null) return
+    
+    List<NodeModel> selected = selectedMapNodes()
+    if (selected.isEmpty()) {
+        // If no node is selected, clear tree selection
+        tagTree.clearSelection()
+    return
+}
+
+    // Collect all tags from selected nodes
+    Set<String> allTags = new HashSet<String>()
+    selected.each { nodeModel ->
+        allTags.addAll(tagsOf(nodeModel))
+    }
+    
+    if (allTags.isEmpty()) {
+        tagTree.clearSelection()
+        return
+    }
+    
+    // Select the first tag (priority to tags with higher priority)
+    String firstTag = allTags.first()
+    
+    // Find and select the tag in the tree
+    DefaultMutableTreeNode node = findNodeByQn(treeRootNode, firstTag)
+    if (node != null) {
+        TreePath path = new TreePath(node.getPath())
+        // Unfold the path
+        TreePath parentPath = path.getParentPath()
+        while (parentPath != null && parentPath.getPathCount() > 1) {
+            tagTree.expandPath(parentPath)
+            parentPath = parentPath.getParentPath()
+        }
+        tagTree.setSelectionPath(path)
+        tagTree.scrollPathToVisible(path)
+    } else {
+        // If the tag is not in the tree (may be filtered),
+        // try to find another tag
+        for (String tag : allTags) {
+            node = findNodeByQn(treeRootNode, tag)
+            if (node != null) {
+                TreePath path = new TreePath(node.getPath())
+                TreePath parentPath = path.getParentPath()
+                while (parentPath != null && parentPath.getPathCount() > 1) {
+                    tagTree.expandPath(parentPath)
+                    parentPath = parentPath.getParentPath()
+                }
+                tagTree.setSelectionPath(path)
+                tagTree.scrollPathToVisible(path)
+                break
+            }
+        }
+    }
+}
+
 void updateAssignedMarks() {
     if (tagTree == null) return
 
@@ -2392,8 +2392,6 @@ void updateAssignedMarks() {
 
     Set<String> markedNow = new HashSet<String>(assignedAll)
     markedNow.addAll(assignedSome)
-    // a marker appearing or disappearing changes the row's WIDTH by ~14px, and a repaint
-    // alone keeps the width the tree measured before it — see remeasureRows
     Set<String> changed = new HashSet<String>(markedBefore)
     changed.removeAll(markedNow)
     Set<String> appeared = new HashSet<String>(markedNow)
@@ -2407,6 +2405,9 @@ void updateAssignedMarks() {
         favoritesStrip.components.each { if (it instanceof JLabel) applyChipText((JLabel) it) }
         favoritesStrip.repaint()
     }
+    
+    // Remove call to updateTreeSelectionFromMap
+    // Node selection in the map no longer affects tree selection
 }
 
 void toggleTagOnSelection(TagRow row) {
@@ -2414,8 +2415,6 @@ void toggleTagOnSelection(TagRow row) {
     toggleTagQn(row.qualifiedName)
 }
 
-// the tag is addressed by qualified name so the favorites chips (which may point at a tag
-// the map no longer has) share the very same path as the tree
 void toggleTagQn(String qn) {
     if (qn == null || qn.isEmpty()) return
     List<NodeModel> selected = selectedMapNodes()
@@ -2437,9 +2436,8 @@ void toggleTagQn(String qn) {
     showStatus((allHave ? "Removed '" : "Assigned '") + qn + (allHave ? "' from " : "' to ")
             + touched + " node" + (touched == 1 ? "" : "s"))
     updateAssignedMarks()
-    // assigning an unknown tag registers it on the map: the tree has to catch up
     if (!allHave && rowByQn(qn) == null) scheduleRefresh()
-    if (!allHave) maybeCloseAfterInsert(touched)   // a removal never closes
+    if (!allHave) maybeCloseAfterInsert(touched)
 }
 
 void assignTagToSelection(TagRow row) {
@@ -2486,19 +2484,13 @@ void removeTagQn(String qn) {
     updateAssignedMarks()
 }
 
-// ENTER in the field: assign the best match; nothing matches -> create the typed tag.
-// Ctrl+ENTER: always create as typed. Mirrors the Edit-Tags "type, Enter, done" flow.
 void commitFieldAction(boolean forceCreate) {
-    // ENTER may arrive before the debounce fired: bring the tree up to date first, or
-    // bestMatchRow() would pick from the previous keystroke's rows
     applyFilterText()
 
     String text = filterField.getText().trim()
     if (text.isEmpty()) return
 
     TagRow target = forceCreate ? null : bestMatchRow()
-    // clear the field BEFORE assigning: the assignment may close the panel, and the view
-    // state is stashed at that moment — a leftover filter would come back on the next open
     filterField.setText("")
 
     if (target != null) {
@@ -2508,10 +2500,6 @@ void commitFieldAction(boolean forceCreate) {
     createAndAssignTag(text)
 }
 
-// What ENTER acts on: the selected row — but only if it MATCHES the filter. A selection
-// left over on an ancestor shown for context (filtering 'thammy' still draws
-// ProjetosEspecíficos) must not be what Enter assigns; in that case, and when nothing is
-// selected, take the first matching row, the same one the arrows would land on first.
 TagRow bestMatchRow() {
     TagRow selected = selectedRow()
     if (rowMatchesFilter(selected)) return selected
@@ -2519,8 +2507,6 @@ TagRow bestMatchRow() {
     int first = firstNavigableRow()
     if (first >= 0) return rowOf(tagTree.getPathForRow(first))
 
-    // no match at all: fall back to the first real row on screen (an unfiltered tree with
-    // only headers cannot happen, so this is just belt and braces)
     for (int i = 0; i < tagTree.getRowCount(); i++) {
         TagRow row = rowOf(tagTree.getPathForRow(i))
         if (row != null && !row.synthetic) return row
@@ -2528,8 +2514,6 @@ TagRow bestMatchRow() {
     return null
 }
 
-// a tag created under a collapsed (or new) category would be born hidden — expand
-// every ancestor level so the creation is visible
 void revealAncestorsOf(String qualifiedText) {
     List<String> segments = qualifiedText.split(java.util.regex.Pattern.quote(separator())) as List<String>
     for (int i = 1; i < segments.size(); i++) {
@@ -2541,8 +2525,6 @@ void createAndAssignTag(String qualifiedText) {
     revealAncestorsOf(qualifiedText)
     List<NodeModel> selected = selectedMapNodes()
     if (selected.isEmpty()) {
-        // no node to assign to: still create the tag in the map's categories, under the
-        // colour policy (here it must create even in "default" mode — creating IS the point)
         if (createMissingSegments(qualifiedText, true)) {
             showStatus("Created '" + qualifiedText + "' (no node selected, nothing assigned)")
         } else {
@@ -2552,15 +2534,13 @@ void createAndAssignTag(String qualifiedText) {
         return
     }
 
-    // pre-create the missing levels already coloured; in "default" mode this is a no-op
-    // and the assignment below registers the tag exactly as it always did
     createMissingSegments(qualifiedText, false)
 
     int touched = 0
     selected.each { nodeModel ->
         def tags = ProxyFactory.createNode(nodeModel, null).getTags()
         if (!tags.getTags().contains(qualifiedText)) {
-            tags.add(qualifiedText)   // registers the tag (and its category path) on the map
+            tags.add(qualifiedText)
             touched++
         }
     }
@@ -2570,13 +2550,11 @@ void createAndAssignTag(String qualifiedText) {
     maybeCloseAfterInsert(touched)
 }
 
-// preferences that live in the PROFILE and are read once per opening
 void loadPanelPreferences() {
     try {
         showUsageCounts = ResourceController.getResourceController()
                 .getBooleanProperty(SHOW_USAGE_COUNTS_KEY, showUsageCounts)
     } catch (Throwable t) {
-        // keep the field's own default
     }
 }
 
@@ -2589,9 +2567,6 @@ boolean isCloseAfterInsert() {
     }
 }
 
-// ⚠️ NOT named set*: in Groovy a set<Name>(arg) method IS the setter of the property
-// <name>, and the call can be resolved as a field write with the body never running
-// (the trap that cost a whole investigation in toggleWideMode).
 void applyCloseAfterInsert(boolean enabled) {
     try {
         ResourceController.getResourceController().setProperty(CLOSE_AFTER_INSERT_KEY, enabled)
@@ -2602,8 +2577,6 @@ void applyCloseAfterInsert(boolean enabled) {
     }
 }
 
-// Called at the very END of every path that assigns, so nothing touches the widgets after
-// the teardown. closePanel() also hands the focus back to the map, which is the point.
 void maybeCloseAfterInsert(int assignedCount) {
     if (assignedCount <= 0 || tagPanel == null) return
     if (!isCloseAfterInsert()) return
@@ -2628,8 +2601,6 @@ String newTagColorMode() {
     }
 }
 
-// null when no colour was ever picked — that is what lets "inherit" fall through to
-// Freeplane's own default for a top-level tag, instead of silently painting it
 String chosenFixedColor() {
     try {
         return ResourceController.getResourceController().getProperty(NEW_TAG_COLOR_KEY, null)
@@ -2650,10 +2621,6 @@ Map<String, String> colorByQualifiedName(def state) {
     return colors
 }
 
-// Colour spec for each segment of a path being created, top-down. A null entry means
-// "let Freeplane decide". ⚠️ It has to be per SEGMENT: creating 'a::b::c' from nothing
-// creates three tags, and Freeplane gives EACH of them a colour of its own (measured) —
-// colouring only the leaf would leave the new branch as random as before.
 List<String> colorsForNewPath(List<String> path, Map<String, String> existingColors) {
     String mode = newTagColorMode()
 
@@ -2662,7 +2629,7 @@ List<String> colorsForNewPath(List<String> path, Map<String, String> existingCol
         return path.collect { fixed }
     }
     if (mode != "inherit") {
-        return path.collect { (String) null }   // "default": Freeplane keeps deciding
+        return path.collect { (String) null }
     }
 
     String separator = separator()
@@ -2673,19 +2640,12 @@ List<String> colorsForNewPath(List<String> path, Map<String, String> existingCol
         if (i > 0) qualified.append(separator)
         qualified.append(path.get(i))
         String existing = existingColors.get(qualified.toString())
-        // an ancestor that already exists sets the tone for everything below it
         if (existing != null) inherited = existing
         colors.add(existing != null ? existing : (inherited ?: chosenFixedColor()))
     }
     return colors
 }
 
-// Creates whatever is missing of a qualified path, each level already carrying the colour
-// the policy asks for, in ONE instruction request. ✅ Verified: that request is a single
-// undo step AND it composes with the assignment that follows — one Ctrl+Z takes back both.
-//
-// evenInDefaultMode=false keeps the "default" mode byte-for-byte as before: nothing is
-// pre-created and the assignment itself registers the tag, exactly like it always did.
 boolean createMissingSegments(String qualifiedText, boolean evenInDefaultMode) {
     if (!evenInDefaultMode && newTagColorMode() == "default") return false
 
@@ -2727,8 +2687,6 @@ String hexOf(Color color) {
     return String.format("#%02x%02x%02x", color.getRed(), color.getGreen(), color.getBlue())
 }
 
-// the branch itself first, then every descendant (paths straight from the map state, so a
-// filtered tree does not shrink what gets recoloured)
 List<List<String>> branchPaths(def state, List<String> rootPath) {
     List<List<String>> paths = [new ArrayList<String>(rootPath)]
     List pending = new ArrayList(childrenAt(state, rootPath))
@@ -2756,10 +2714,6 @@ void chooseBranchColor(TagRow row) {
     applyBranchColor(row, hexOf(chosen))
 }
 
-// The whole branch in a SINGLE request — one undo step for the lot (verified). This is
-// the explicit form of what #2950 asks for ("apply this color to all child tags"): an
-// action the user picks from the menu, not a hidden mode that changes what a plain
-// "Set color…" does.
 void applyBranchColor(TagRow row, String colorSpec) {
     if (row == null || row.path == null || colorSpec == null) return
 
@@ -2767,13 +2721,13 @@ void applyBranchColor(TagRow row, String colorSpec) {
     try {
         state = readState()
     } catch (Throwable t) {
-        reportReadFailure(t)
+        showStatus("Could not read tags: " + t.getMessage())
         return
     }
 
     List<List<String>> paths = branchPaths(state, row.path)
     if (paths.size() <= 1) {
-        applyTagColor(row, colorSpec)   // no sub-tags: a plain colour change
+        applyTagColor(row, colorSpec)
         return
     }
 
@@ -2800,8 +2754,6 @@ void applyBranchColor(TagRow row, String colorSpec) {
  ↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Structure edits (the Manage-Categories role) ↓↓↓↓↓↓↓↓
 */
 
-// every structural edit goes through the public instruction API: one undo step each,
-// node tags rewritten along, optimistic-locked by the revision
 def runInstruction(MapTagCategoryInstructionType type, Map args) {
     def mindMap = ProxyFactory.createNode(boundMapView.map.rootNode, null).mindMap
     def categories = mindMap.tagCategories
@@ -2812,16 +2764,12 @@ def runInstruction(MapTagCategoryInstructionType type, Map args) {
     categories.edit(new MapTagCategoryInstructionRequest(categories.read().revision, [instruction]))
 }
 
-// sibling arithmetic verified in TagTreeKeyboardReorder: DOWN inserts two slots ahead
-// (insert-then-remove), PROMOTE lands right after the old parent
 void moveSelectedTag(String direction) {
     TagRow row = selectedRow()
     if (row == null || row.synthetic) {
         showStatus("Select a tag first")
         return
     }
-    // the rows are in usage order, so "up" would move the tag somewhere unrelated to what
-    // the eye expects — the same reason the drop is refused (see planDropMove)
     if (isSortByUsage()) {
         showStatus("Reordering is off while sorting by usage — switch back to the tree order")
         return
@@ -2835,7 +2783,7 @@ void moveSelectedTag(String direction) {
     try {
         state = readState()
     } catch (Throwable t) {
-        reportReadFailure(t)
+        showStatus("Could not read tags: " + t.getMessage())
         return
     }
 
@@ -2891,7 +2839,6 @@ void moveSelectedTag(String direction) {
     }
 }
 
-// children list at a category path in the state DTO ([] = top level)
 List childrenAt(def state, List<String> path) {
     List current = state.categories
     for (String segment : path) {
@@ -2931,8 +2878,6 @@ void commitRename() {
         String newQn = (parentPath.isEmpty() ? "" : parentPath.join(separator()) + separator()) + newName
         remapFavorites(row.qualifiedName, newQn)
         showStatus("Renamed to '" + newName + "' — node tags follow; Ctrl+Z undoes")
-        // force: this runs FROM the editor's editingStopped, where isEditing() can still be
-        // true — and postponing here would rebuild after selectRowByQn, losing the selection
         refreshTree(true)
         selectRowByQn(newQn)
     } catch (Throwable t) {
@@ -2955,7 +2900,7 @@ void addChildTag(TagRow parentRow) {
     try {
         state = readState()
     } catch (Throwable t) {
-        reportReadFailure(t)
+        showStatus("Could not read tags: " + t.getMessage())
         return
     }
     List existing = childrenAt(state, parentRow.path)
@@ -2968,8 +2913,6 @@ void addChildTag(TagRow parentRow) {
     }
     List<String> newPath = new ArrayList<String>(parentRow.path)
     newPath.add(name)
-    // the child is born under the colour policy — this is the "new child tags inherit the
-    // parent's colour" half of #2950
     String newColor = colorsForNewPath(newPath, colorByQualifiedName(state)).last()
     try {
         runInstruction(MapTagCategoryInstructionType.ADD_TAG,
@@ -2978,8 +2921,6 @@ void addChildTag(TagRow parentRow) {
         refreshTree()
         String newQn = parentRow.qualifiedName + separator() + name
         selectRowByQn(newQn)
-        // the rename editor really stays open now (see the isEditing guard in refreshTree), so
-        // the hint is "type", not "press F2 because the editor disappeared"
         showStatus("Added '" + name + "' — type the name")
         startRename()
     } catch (Throwable t) {
@@ -2987,8 +2928,6 @@ void addChildTag(TagRow parentRow) {
     }
 }
 
-// The deletion itself. Undoable in one step, so anything that got here through a
-// deliberate gesture (picking it from the menu) just does it.
 void deleteTagNow(TagRow row) {
     if (row == null || row.synthetic) return
     armedDeleteQn = null
@@ -3003,10 +2942,6 @@ void deleteTagNow(TagRow row) {
     }
 }
 
-// KEYBOARD path only: a stray Delete with the tree focused should not destroy a tag, so the
-// first press arms (the row turns red) and the second one within the window deletes.
-// ⚠️ Do NOT reuse this for the context menu: there the choice was already deliberate, and
-// since the menu closes on the first click, "confirming" would mean reopening the menu.
 void deleteSelectedTag() {
     TagRow row = selectedRow()
     if (row == null || row.synthetic) return
@@ -3040,6 +2975,7 @@ void applyTagColor(TagRow row, String colorSpec) {
     }
 }
 
+
 void moveToUncategorized(TagRow row) {
     try {
         runInstruction(MapTagCategoryInstructionType.MOVE_TAG,
@@ -3069,20 +3005,21 @@ void categorizeAtTopLevel(TagRow row) {
 
 
 /*
- ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Drag & drop (edit mode only) ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
+ ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Drag & drop (always enabled) ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
 */
 
 TransferHandler createTreeDndHandler() {
     return new TransferHandler() {
         @Override
         int getSourceActions(JComponent component) {
-            return editMode ? TransferHandler.MOVE : TransferHandler.NONE
+            // Drag & drop is always available - no edit mode needed
+            return TransferHandler.MOVE
         }
 
         @Override
         Transferable createTransferable(JComponent component) {
-            TagRow row = selectedRow()   // dragEnabled selects the pressed row before exporting
-            if (!editMode || row == null || row.synthetic) return null
+            TagRow row = selectedRow()
+            if (row == null || row.synthetic) return null
             draggedRow = row
             return new Transferable() {
                 @Override
@@ -3101,7 +3038,7 @@ TransferHandler createTreeDndHandler() {
 
         @Override
         boolean canImport(TransferHandler.TransferSupport support) {
-            if (!editMode || draggedRow == null) return false
+            if (draggedRow == null) return false
             if (!support.isDataFlavorSupported(tagDndFlavor)) return false
             return dropPlanFrom(support) != null
         }
@@ -3110,23 +3047,17 @@ TransferHandler createTreeDndHandler() {
         boolean importData(TransferHandler.TransferSupport support) {
             Map plan = dropPlanFrom(support)
             if (plan == null) return false
-            // the model must NOT change inside importData: the DropHandler's cleanup runs
-            // right AFTER it and repaints the drop line from the PRE-drop TreePath — a
-            // synchronous rebuild leaves getPathBounds null and BasicTreeUI throws
-            // "Cannot read field y because rect is null" (seen in the log)
             SwingUtilities.invokeLater { performDropMove(plan) }
             return true
         }
 
         @Override
         void exportDone(JComponent source, Transferable data, int action) {
-            draggedRow = null   // the edit() already moved the tag; nothing to remove here
+            draggedRow = null
         }
     }
 }
 
-// maps the Swing drop location to a move plan. ON a row: childIndex == -1 and the path
-// IS the target; INSERT: the path is the PARENT and childIndex the slot among children.
 Map dropPlanFrom(TransferHandler.TransferSupport support) {
     if (!support.isDrop()) return null
     JTree.DropLocation location = (JTree.DropLocation) support.getDropLocation()
@@ -3138,25 +3069,18 @@ Map dropPlanFrom(TransferHandler.TransferSupport support) {
     return planDropMove((TagRow) draggedRow, parent, childIndex < 0 ? null : childIndex)
 }
 
-// parentRow: null = top level; the synthetic "uncategorized" header (or one of its
-// items) = the uncategorized bucket; childIndex: null = append (drop ON the parent).
-// Returns null when the drop makes no sense — canImport then shows the no-drop cursor.
 Map planDropMove(TagRow dragged, TagRow parentRow, Integer childIndex) {
     if (dragged == null || dragged.synthetic) return null
-    // the visual childIndex would be computed against the FILTERED tree and would not
-    // match the real sibling list the instruction acts on
     if (!filterText.isEmpty()) return null
-    // and in usage order the rows are not siblings at all — there is no hierarchy on screen
-    // to drop into
     if (isSortByUsage()) return null
     String sep = separator()
 
     boolean toUncategorized = parentRow != null &&
             (parentRow.uncategorized || (parentRow.synthetic && parentRow.name == "uncategorized"))
     if (toUncategorized) {
-        if (dragged.uncategorized) return null   // the bucket is alphabetical: no manual order
+        if (dragged.uncategorized) return null
         DefaultMutableTreeNode draggedNode = findNodeByQn(treeRootNode, dragged.qualifiedName)
-        if (draggedNode != null && draggedNode.getChildCount() > 0) return null   // leaves only, like the native dialog
+        if (draggedNode != null && draggedNode.getChildCount() > 0) return null
         return [path: dragged.path, newParentPath: null, targetLocation: MapTagTargetLocation.UNCATEGORIZED,
                 index: null, newQn: dragged.name, expandQn: null]
     }
@@ -3165,26 +3089,23 @@ Map planDropMove(TagRow dragged, TagRow parentRow, Integer childIndex) {
     List<String> parentPath = parentRow == null ? [] : parentRow.path
     String parentQn = parentRow?.qualifiedName
     if (parentQn != null && !dragged.uncategorized) {
-        if (parentQn == dragged.qualifiedName) return null                          // onto itself
-        if (parentQn.startsWith(dragged.qualifiedName + sep)) return null           // into its own subtree
+        if (parentQn == dragged.qualifiedName) return null
+        if (parentQn.startsWith(dragged.qualifiedName + sep)) return null
     }
 
     String oldParentQn = dragged.uncategorized ? "::uncategorized::"
             : (dragged.path.size() > 1 ? dragged.path.subList(0, dragged.path.size() - 1).join(sep) : null)
     boolean sameParent = !dragged.uncategorized && oldParentQn == parentQn
     if (sameParent) {
-        if (childIndex == null) return null   // dropping ON the parent it is already in
+        if (childIndex == null) return null
         DefaultMutableTreeNode parentNode = parentRow == null ? treeRootNode : findNodeByQn(treeRootNode, parentQn)
         int oldIndex = indexAmongTagChildren(parentNode, dragged.qualifiedName)
-        // the two slots around the current position land it where it already is
         if (oldIndex >= 0 && (childIndex == oldIndex || childIndex == oldIndex + 1)) return null
     }
 
     Integer index = childIndex
     if (index != null) {
         DefaultMutableTreeNode parentNode = parentRow == null ? treeRootNode : findNodeByQn(treeRootNode, parentQn)
-        // at the top level the uncategorized bucket sits AFTER the last category: a drop
-        // below it yields an index past the instruction's maximum — clamp to tag children
         index = Math.max(0, Math.min(index, tagChildCount(parentNode)))
     }
 
@@ -3213,11 +3134,6 @@ String performDropMove(Map plan) {
     }
 }
 
-// ⚠️ `JTree` CACHES the width of each row (it asks the renderer once and remembers). Change
-// what the renderer draws without telling the model and the row keeps the OLD width — the
-// text then gets clipped with an ellipsis even with the panel wide open. MEASURED: the rows
-// that gained a "✓ " wanted exactly 14px more than the tree had reserved, and only those
-// were truncated. `repaint()` does NOT fix it; only a model event makes the tree re-measure.
 void remeasureRows(Collection<String> qualifiedNames) {
     if (qualifiedNames.isEmpty() || tagTree == null) return
     DefaultTreeModel model = (DefaultTreeModel) tagTree.getModel()
@@ -3263,7 +3179,7 @@ int indexAmongTagChildren(DefaultMutableTreeNode parentNode, String qn) {
 }
 
 /*
- ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑ Drag & drop (edit mode only) ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+ ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑ Drag & drop (always enabled) ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
 */
 
 
@@ -3274,7 +3190,7 @@ int indexAmongTagChildren(DefaultMutableTreeNode parentNode, String qn) {
 void showContextMenu(MouseEvent e) {
     TreePath path = tagTree.getPathForLocation(e.getX(), e.getY())
     if (path == null) return
-    tagTree.setSelectionPath(path)   // right-click selects, never toggles
+    tagTree.setSelectionPath(path)
     TagRow row = rowOf(path)
     if (row == null || row.synthetic) return
 
@@ -3289,8 +3205,27 @@ void showContextMenu(MouseEvent e) {
     menu.add(menuItem("Rename  (F2)", { startRename() }))
     if (!row.uncategorized) {
         menu.add(menuItem("Add child tag  (Insert)", { addChildTag(row) }))
+       
+        menu.add(menuItem("⚡ Add Child Tag (Fast)", { 
+         
+                selectRowByQn(row.qualifiedName)
+            
+                openFastChildPanel()
+        }))
     }
     menu.add(menuItem("Delete", { deleteTagNow(row) }))
+    menu.addSeparator()
+    
+    // ===== فقط یک آیتم برای Merge/Assign =====
+    menu.add(menuItem("🔀 Merge / Assign", { 
+        openMergePanel()
+    }))
+
+    // ===== اضافه کردن گزینه Locate =====
+    menu.add(menuItem("📍 Locate Tag", { 
+        installClickLocator()
+    }))
+    
     menu.addSeparator()
     menu.add(menuItem("Set color…", { chooseTagColor(row) }))
     menu.add(menuItem("Reset color to default", { applyTagColor(row, "none") }))
@@ -3325,8 +3260,6 @@ void showContextMenu(MouseEvent e) {
     menu.show(tagTree, e.getX(), e.getY())
 }
 
-// the popup is a separate window: leaving the panel for it fires mouseExited and the
-// panel would retract from under the open menu
 void attachPopupGuard(JPopupMenu menu) {
     menu.addPopupMenuListener([
             popupMenuWillBecomeVisible  : { PopupMenuEvent ev -> popupOpen = true },
@@ -3335,7 +3268,6 @@ void attachPopupGuard(JPopupMenu menu) {
     ] as PopupMenuListener)
 }
 
-// panel behaviour, reachable from every context menu the panel shows
 void addPanelOptionItems(JPopupMenu menu) {
     menu.addSeparator()
     JCheckBoxMenuItem closeItem = new JCheckBoxMenuItem("Close after insert", isCloseAfterInsert())
@@ -3351,9 +3283,6 @@ void addPanelOptionItems(JPopupMenu menu) {
  ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Options dialog ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
 */
 
-// NON-modal, on purpose: a modal dialog blocks the EDT (and hangs a script host outright),
-// and the panel's whole idiom is non-blocking. It applies on the spot — no OK/Cancel, no
-// pending state to forget about — and it dies with the panel it configures.
 void showOptionsDialog() {
     Object opened = boundScrollPane.getClientProperty(OPTIONS_DIALOG_KEY)
     if (opened instanceof JDialog && ((JDialog) opened).isDisplayable()) {
@@ -3486,12 +3415,703 @@ void showOptionsDialog() {
         @Override
         void windowClosed(WindowEvent e) {
             boundScrollPane.putClientProperty(OPTIONS_DIALOG_KEY, null)
-            refreshTree()   // the policy may have changed what the tree should look like
+            refreshTree()
         }
     })
     boundScrollPane.putClientProperty(OPTIONS_DIALOG_KEY, dialog)
     dialog.setVisible(true)
 }
+
+// ============================================================
+// Fast Child Panel (Add Child - Fast version)
+// ============================================================
+
+String getSelectedTagFromTree() {
+    try {
+        TreePath path = tagTree.getSelectionPath()
+        if (path == null) return null
+        
+        def treeNode = path.lastPathComponent
+        if (!(treeNode instanceof javax.swing.tree.DefaultMutableTreeNode)) return null
+        
+        def userObject = treeNode.userObject
+        if (!(userObject instanceof TagRow)) return null
+        
+        return ((TagRow) userObject).qualifiedName
+    } catch (Exception e) {
+        return null
+    }
+}
+
+void selectFastParentTag() {
+    try {
+        if (!fastChildPanelOpen || fastChildPanel == null || !fastChildPanel.isVisible()) return
+        
+        TreePath path = tagTree.getSelectionPath()
+        if (path == null) return
+        
+        def treeNode = path.lastPathComponent
+        if (!(treeNode instanceof javax.swing.tree.DefaultMutableTreeNode)) return
+        
+        def userObject = treeNode.userObject
+        if (!(userObject instanceof TagRow)) return
+        
+        String fullPath = ((TagRow) userObject).qualifiedName
+        if (fullPath == null) return
+        
+        SwingUtilities.invokeLater({
+            fastParentField.setText(fullPath)
+            fastParentField.setForeground(new Color(0, 120, 0))
+            fastWaitingForParent = false
+            fastStatusLabel.setText("✅ Parent selected: ${fullPath}")
+            fastStatusLabel.setForeground(new Color(0, 120, 0))
+            fastAddButton.setEnabled(true)
+            fastChildNameField.requestFocusInWindow()
+        })
+        
+    } catch (Exception e) {
+        e.printStackTrace()
+        fastWaitingForParent = false
+    }
+}
+
+// Function to select tag from tree for Merge
+void selectTagFromTree() {
+    try {
+        if (!isMergePanelOpen || mergePanel == null || !mergePanel.isVisible()) return
+        
+        TreePath path = tagTree.getSelectionPath()
+        if (path == null) return
+        
+        def treeNode = path.lastPathComponent
+        if (!(treeNode instanceof javax.swing.tree.DefaultMutableTreeNode)) return
+        
+        def userObject = treeNode.userObject
+        if (!(userObject instanceof TagRow)) return
+        
+        String fullPath = ((TagRow) userObject).qualifiedName
+        if (fullPath == null) return
+        
+        SwingUtilities.invokeLater({
+            if (selectionStep == 1) {
+                sourceField.setText(fullPath)
+                sourceField.setForeground(new Color(0, 120, 0))
+                selectionStep = 2
+                statusLabel.setText("✅ Source: ${fullPath} | Now click on TARGET tag in tree")
+                statusLabel.setForeground(new Color(0, 120, 0))
+                mergeButton.setEnabled(false)
+            } else if (selectionStep == 2) {
+                String source = sourceField.getText()
+                if (source == fullPath) {
+                    statusLabel.setText("⚠️ Cannot use same tag as source and target")
+                    statusLabel.setForeground(new Color(200, 100, 0))
+                    return
+                }
+                targetField.setText(fullPath)
+                targetField.setForeground(new Color(0, 120, 0))
+                selectionStep = 1
+                statusLabel.setText("✅ Source: ${source} | Target: ${fullPath} | Click MERGE")
+                statusLabel.setForeground(new Color(0, 150, 0))
+                mergeButton.setEnabled(true)
+            }
+        })
+        
+    } catch (Exception e) {
+        e.printStackTrace()
+    }
+}
+
+void openFastChildPanel() {
+    try {
+        def mindmapNode = Controller.currentController.getSelection().getSelected()
+        if (mindmapNode == null) {
+            JOptionPane.showMessageDialog(tagPanel,
+                "Please select a node in the mindmap first.",
+                "Add Child Tag (Fast)",
+                JOptionPane.INFORMATION_MESSAGE)
+            return
+        }
+        
+        if (fastChildPanel != null && fastChildPanel.isVisible()) {
+            fastChildPanel.toFront()
+            return
+        }
+        
+        fastChildPanelOpen = true
+        fastWaitingForParent = false
+        
+        fastChildPanel = new JDialog(SwingUtilities.getWindowAncestor(tagPanel), "⚡ Add Child Tag (Fast)", false)
+        fastChildPanel.setLayout(new BorderLayout(10, 10))
+        fastChildPanel.setSize(550, 250)
+        fastChildPanel.setLocationRelativeTo(tagPanel)
+        fastChildPanel.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE)
+        
+        JPanel mainPanel = new JPanel(new GridBagLayout())
+        GridBagConstraints gbc = new GridBagConstraints()
+        gbc.insets = new Insets(8, 15, 8, 15)
+        gbc.fill = GridBagConstraints.HORIZONTAL
+        
+        gbc.gridx = 0
+        gbc.gridy = 0
+        gbc.gridwidth = 2
+        JLabel helpLabel = new JLabel("💡 Click on a tag in the tree to select as PARENT")
+        helpLabel.setFont(new Font(panelTextFontName, Font.BOLD, 13))
+        helpLabel.setForeground(new Color(0, 100, 0))
+        mainPanel.add(helpLabel, gbc)
+        
+        gbc.gridwidth = 1
+        gbc.gridy = 1
+        gbc.gridx = 0
+        JLabel parentLabel = new JLabel("📁 Parent:")
+        parentLabel.setFont(new Font(panelTextFontName, Font.BOLD, 13))
+        mainPanel.add(parentLabel, gbc)
+        
+        gbc.gridx = 1
+        gbc.gridwidth = 1
+        fastParentField = new JTextField()
+        fastParentField.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        fastParentField.setPreferredSize(new Dimension(350, 30))
+        fastParentField.setEditable(false)
+        fastParentField.setBackground(new Color(245, 245, 245))
+        fastParentField.setForeground(new Color(100, 100, 100))
+        fastParentField.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 200, 200), 1),
+            BorderFactory.createEmptyBorder(3, 8, 3, 8)
+        ))
+        fastParentField.setToolTipText("Click on a tag in the tree to fill this field")
+        mainPanel.add(fastParentField, gbc)
+        
+        gbc.gridy = 2
+        gbc.gridx = 0
+        gbc.gridwidth = 1
+        JLabel childLabel = new JLabel("✏️ Child Name:")
+        childLabel.setFont(new Font(panelTextFontName, Font.BOLD, 13))
+        mainPanel.add(childLabel, gbc)
+        
+        gbc.gridx = 1
+        fastChildNameField = new JTextField()
+        fastChildNameField.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        fastChildNameField.setPreferredSize(new Dimension(350, 30))
+        fastChildNameField.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 200, 200), 1),
+            BorderFactory.createEmptyBorder(3, 8, 3, 8)
+        ))
+        fastChildNameField.setToolTipText("Enter the name for the child tag")
+        fastChildNameField.addActionListener({ ActionEvent e ->
+            if (fastAddButton.isEnabled()) {
+                performFastAddChild()
+            }
+        } as ActionListener)
+        mainPanel.add(fastChildNameField, gbc)
+        
+        gbc.gridy = 3
+        gbc.gridx = 0
+        gbc.gridwidth = 2
+        fastStatusLabel = new JLabel(" 🔵 Click on a tag in the tree to select as PARENT")
+        fastStatusLabel.setFont(new Font(panelTextFontName, Font.BOLD, 12))
+        fastStatusLabel.setForeground(new Color(0, 0, 150))
+        fastStatusLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5))
+        mainPanel.add(fastStatusLabel, gbc)
+        
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 15, 5))
+        
+        fastAddButton = new JButton("⚡ Add & Remove")
+        fastAddButton.setFont(new Font(panelTextFontName, Font.BOLD, 14))
+        fastAddButton.setBackground(new Color(255, 200, 100))
+        fastAddButton.setForeground(new Color(150, 80, 0))
+        fastAddButton.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 120, 0), 2),
+            BorderFactory.createEmptyBorder(8, 25, 8, 25)
+        ))
+        fastAddButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+        fastAddButton.setEnabled(false)
+        fastAddButton.setToolTipText("Add child tag (auto-removes after 2s)")
+        fastAddButton.addActionListener({ ActionEvent e ->
+            performFastAddChild()
+        } as ActionListener)
+        buttonPanel.add(fastAddButton)
+        
+        JButton resetButton = new JButton("↺ Reset")
+        resetButton.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        resetButton.addActionListener({ ActionEvent e ->
+            fastParentField.setText("")
+            fastParentField.setForeground(new Color(100, 100, 100))
+            fastChildNameField.setText("")
+            fastWaitingForParent = true
+            fastStatusLabel.setText(" 🔵 Click on a tag in the tree to select as PARENT")
+            fastStatusLabel.setForeground(new Color(0, 0, 150))
+            fastAddButton.setEnabled(false)
+            String currentTag = getSelectedTagFromTree()
+            if (currentTag != null) {
+                fastParentField.setText(currentTag)
+                fastParentField.setForeground(new Color(0, 120, 0))
+                fastWaitingForParent = false
+                fastStatusLabel.setText("✅ Parent selected: ${currentTag}")
+                fastStatusLabel.setForeground(new Color(0, 120, 0))
+                fastAddButton.setEnabled(true)
+                fastChildNameField.requestFocusInWindow()
+            }
+        } as ActionListener)
+        buttonPanel.add(resetButton)
+        
+        JButton closeBtn = new JButton("✕ Close")
+        closeBtn.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        closeBtn.addActionListener({ ActionEvent e ->
+            fastChildPanel.dispose()
+            fastChildPanelOpen = false
+            fastWaitingForParent = false
+        } as ActionListener)
+        buttonPanel.add(closeBtn)
+        
+        fastChildPanel.add(mainPanel, BorderLayout.CENTER)
+        fastChildPanel.add(buttonPanel, BorderLayout.SOUTH)
+        
+        fastChildPanel.addWindowListener(new WindowAdapter() {
+            @Override
+            void windowClosing(WindowEvent e) {
+                fastChildPanelOpen = false
+                fastWaitingForParent = false
+            }
+        })
+        
+        fastChildPanel.setVisible(true)
+        
+        String currentTag = getSelectedTagFromTree()
+        if (currentTag != null) {
+            fastParentField.setText(currentTag)
+            fastParentField.setForeground(new Color(0, 120, 0))
+            fastWaitingForParent = false
+            fastStatusLabel.setText("✅ Parent selected: ${currentTag}")
+            fastStatusLabel.setForeground(new Color(0, 120, 0))
+            fastAddButton.setEnabled(true)
+            fastChildNameField.requestFocusInWindow()
+        } else {
+            fastWaitingForParent = true
+            fastStatusLabel.setText(" 🔵 Please click on a tag in the tree to select as PARENT")
+            fastStatusLabel.setForeground(new Color(0, 0, 150))
+        }
+        
+    } catch (Exception e) {
+        JOptionPane.showMessageDialog(tagPanel,
+            "Error: ${e.message}",
+            "Error",
+            JOptionPane.ERROR_MESSAGE)
+        e.printStackTrace()
+        fastChildPanelOpen = false
+        fastWaitingForParent = false
+    }
+}
+
+void performFastAddChild() {
+    try {
+        String parentPath = fastParentField.getText()
+        String childName = fastChildNameField.getText().trim()
+        
+        if (parentPath.isEmpty()) {
+            JOptionPane.showMessageDialog(fastChildPanel,
+                "Please select a parent tag from the tree.",
+                "Error",
+                JOptionPane.WARNING_MESSAGE)
+            return
+        }
+        
+        if (childName.isEmpty()) {
+            JOptionPane.showMessageDialog(fastChildPanel,
+                "Please enter a name for the child tag.",
+                "Error",
+                JOptionPane.WARNING_MESSAGE)
+            return
+        }
+        
+        def mindmapNode = Controller.currentController.getSelection().getSelected()
+        if (mindmapNode == null) {
+            JOptionPane.showMessageDialog(fastChildPanel,
+                "No mindmap node selected.",
+                "Error",
+                JOptionPane.ERROR_MESSAGE)
+            return
+        }
+        
+        String fullTagName = "${parentPath}::${childName}"
+        
+        // Use IconController.getController()
+        def iconController = IconController.getController()
+        if (iconController == null) {
+            JOptionPane.showMessageDialog(fastChildPanel,
+                "Icon controller not available.",
+                "Error",
+                JOptionPane.ERROR_MESSAGE)
+            return
+        }
+        
+        def tag = new Tag(fullTagName, Color.ORANGE)
+        iconController.addTags(mindmapNode, [tag])
+        
+        Timer timer = new Timer(fastRemoveDelayMs, { e ->
+            try {
+                def tags = new HashSet<Tag>()
+                tags.add(tag)
+                iconController.removeTags(mindmapNode, tags)
+                println "Tag '${fullTagName}' removed from mindmap node."
+                scheduleRefresh()
+            }
+            catch(Exception ex) {
+                ex.printStackTrace()
+            }
+        } as java.awt.event.ActionListener)
+        
+        timer.setRepeats(false)
+        timer.start()
+        
+        scheduleRefresh()
+        
+        fastParentField.setText("")
+        fastParentField.setForeground(new Color(100, 100, 100))
+        fastChildNameField.setText("")
+        
+        String currentTag = getSelectedTagFromTree()
+        if (currentTag != null) {
+            fastParentField.setText(currentTag)
+            fastParentField.setForeground(new Color(0, 120, 0))
+            fastWaitingForParent = false
+            fastStatusLabel.setText("✅ Parent selected: ${currentTag}")
+            fastStatusLabel.setForeground(new Color(0, 120, 0))
+            fastAddButton.setEnabled(true)
+            fastChildNameField.requestFocusInWindow()
+        } else {
+            fastWaitingForParent = true
+            fastStatusLabel.setText(" 🔵 Click on a tag in the tree to select as PARENT")
+            fastStatusLabel.setForeground(new Color(0, 0, 150))
+            fastAddButton.setEnabled(false)
+        }
+        
+    } catch (Exception ex) {
+        ex.printStackTrace()
+        JOptionPane.showMessageDialog(fastChildPanel,
+            "Error: ${ex.getMessage()}",
+            "Error",
+            JOptionPane.ERROR_MESSAGE)
+    }
+}
+
+
+// ============================================================
+// Merge/Copy Panel
+// ============================================================
+
+void openMergePanel() {
+    try {
+        if (mergePanel != null && mergePanel.isVisible()) {
+            mergePanel.toFront()
+            return
+        }
+        
+        isMergePanelOpen = true
+        selectionStep = 1
+        
+        mergePanel = new JDialog(SwingUtilities.getWindowAncestor(tagPanel), "🔀 Merge OR Assign", false)
+        mergePanel.setLayout(new BorderLayout(10, 10))
+        mergePanel.setSize(600, 300)
+        mergePanel.setLocationRelativeTo(tagPanel)
+        mergePanel.setDefaultCloseOperation(JDialog.DISPOSE_ON_CLOSE)
+        
+        JPanel mainPanel = new JPanel(new GridBagLayout())
+        GridBagConstraints gbc = new GridBagConstraints()
+        gbc.insets = new Insets(8, 15, 8, 15)
+        gbc.fill = GridBagConstraints.HORIZONTAL
+        
+        gbc.gridx = 0
+        gbc.gridy = 0
+        gbc.gridwidth = 3
+        JLabel helpLabel = new JLabel("💡 Click 1st tag in tree → SOURCE | Click 2nd tag → TARGET")
+        helpLabel.setFont(new Font(panelTextFontName, Font.BOLD, 13))
+        helpLabel.setForeground(new Color(0, 100, 0))
+        mainPanel.add(helpLabel, gbc)
+        
+        gbc.gridwidth = 1
+        gbc.gridy = 1
+        gbc.gridx = 0
+        JLabel sourceLabel = new JLabel("🔽 Source:")
+        sourceLabel.setFont(new Font(panelTextFontName, Font.BOLD, 13))
+        mainPanel.add(sourceLabel, gbc)
+        
+        gbc.gridx = 1
+        gbc.gridwidth = 2
+        sourceField = new JTextField()
+        sourceField.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        sourceField.setPreferredSize(new Dimension(350, 30))
+        sourceField.setEditable(false)
+        sourceField.setBackground(new Color(245, 245, 245))
+        sourceField.setForeground(new Color(100, 100, 100))
+        sourceField.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 200, 200), 1),
+            BorderFactory.createEmptyBorder(3, 8, 3, 8)
+        ))
+        mainPanel.add(sourceField, gbc)
+        
+        gbc.gridwidth = 1
+        gbc.gridy = 2
+        gbc.gridx = 0
+        JLabel targetLabel = new JLabel("🔼 Target:")
+        targetLabel.setFont(new Font(panelTextFontName, Font.BOLD, 13))
+        mainPanel.add(targetLabel, gbc)
+        
+        gbc.gridx = 1
+        gbc.gridwidth = 2
+        targetField = new JTextField()
+        targetField.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        targetField.setPreferredSize(new Dimension(350, 30))
+        targetField.setEditable(false)
+        targetField.setBackground(new Color(245, 245, 245))
+        targetField.setForeground(new Color(100, 100, 100))
+        targetField.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(200, 200, 200), 1),
+            BorderFactory.createEmptyBorder(3, 8, 3, 8)
+        ))
+        mainPanel.add(targetField, gbc)
+        
+        gbc.gridwidth = 1
+        gbc.gridy = 3
+        gbc.gridx = 0
+        JLabel modeLabel = new JLabel("⚙️ Mode:")
+        modeLabel.setFont(new Font(panelTextFontName, Font.BOLD, 13))
+        mainPanel.add(modeLabel, gbc)
+        
+        gbc.gridx = 1
+        gbc.gridwidth = 1
+        String[] modes = ["🔀 Merge (remove source)", "➕ Assign Tag Additionally (keep both)"]
+        modeCombo = new JComboBox<String>(modes)
+        modeCombo.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        modeCombo.setPreferredSize(new Dimension(200, 30))
+        modeCombo.setToolTipText("Merge: replace source with target (remove source) | Assign Tag Additionally: add source to nodes that have target (keep both)")
+        mainPanel.add(modeCombo, gbc)
+        
+        gbc.gridwidth = 3
+        gbc.gridy = 4
+        gbc.gridx = 0
+        statusLabel = new JLabel(" 🔵 Click on a tag in the tree to select as SOURCE")
+        statusLabel.setFont(new Font(panelTextFontName, Font.BOLD, 12))
+        statusLabel.setForeground(new Color(0, 0, 150))
+        statusLabel.setBorder(BorderFactory.createEmptyBorder(5, 5, 5, 5))
+        mainPanel.add(statusLabel, gbc)
+        
+        JPanel buttonPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 15, 5))
+        
+        mergeButton = new JButton("⚡ OK")
+        mergeButton.setFont(new Font(panelTextFontName, Font.BOLD, 14))
+        mergeButton.setBackground(new Color(220, 240, 220))
+        mergeButton.setForeground(new Color(0, 120, 0))
+        mergeButton.setBorder(BorderFactory.createCompoundBorder(
+            BorderFactory.createLineBorder(new Color(0, 150, 0), 2),
+            BorderFactory.createEmptyBorder(8, 25, 8, 25)
+        ))
+        mergeButton.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
+        mergeButton.setEnabled(false)
+        mergeButton.addActionListener({ ActionEvent e ->
+            performMerge()
+        } as ActionListener)
+        buttonPanel.add(mergeButton)
+        
+        JButton resetButton = new JButton("↺ Reset")
+        resetButton.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        resetButton.addActionListener({ ActionEvent e ->
+            sourceField.setText("")
+            sourceField.setForeground(new Color(100, 100, 100))
+            targetField.setText("")
+            targetField.setForeground(new Color(100, 100, 100))
+            selectionStep = 1
+            statusLabel.setText(" 🔵 Click on a tag in the tree to select as SOURCE")
+            statusLabel.setForeground(new Color(0, 0, 150))
+            mergeButton.setEnabled(false)
+        } as ActionListener)
+        buttonPanel.add(resetButton)
+        
+        JButton closeBtn = new JButton("✕ Close")
+        closeBtn.setFont(new Font(panelTextFontName, Font.PLAIN, 13))
+        closeBtn.addActionListener({ ActionEvent e ->
+            mergePanel.dispose()
+            isMergePanelOpen = false
+            selectionStep = 1
+        } as ActionListener)
+        buttonPanel.add(closeBtn)
+        
+        mergePanel.add(mainPanel, BorderLayout.CENTER)
+        mergePanel.add(buttonPanel, BorderLayout.SOUTH)
+        
+        mergePanel.addWindowListener(new WindowAdapter() {
+            @Override
+            void windowClosing(WindowEvent e) {
+                isMergePanelOpen = false
+                selectionStep = 1
+            }
+        })
+        
+        mergePanel.setVisible(true)
+        
+    } catch (Exception e) {
+        JOptionPane.showMessageDialog(tagPanel,
+            "Error: ${e.message}",
+            "Merge Error",
+            JOptionPane.ERROR_MESSAGE)
+        e.printStackTrace()
+        isMergePanelOpen = false
+        selectionStep = 1
+    }
+}
+
+// Execute merge
+void performMerge() {
+    try {
+        String sourceFull = sourceField.getText()
+        String targetFull = targetField.getText()
+        
+        if (sourceFull.isEmpty() || targetFull.isEmpty()) {
+            JOptionPane.showMessageDialog(mergePanel,
+                "Please select both source and target tags.",
+                "Error",
+                JOptionPane.WARNING_MESSAGE)
+            return
+        }
+        
+        if (sourceFull == targetFull) {
+            JOptionPane.showMessageDialog(mergePanel,
+                "Source and target cannot be the same.",
+                "Error",
+                JOptionPane.WARNING_MESSAGE)
+            return
+        }
+        
+        String source = sourceFull
+        String target = targetFull
+        
+        String mode = modeCombo.getSelectedItem()
+        boolean isMerge = mode.contains("Merge")
+        
+        String actionName = isMerge ? "Merge" : "Assign"
+        String actionIcon = isMerge ? "🔀" : "➕"
+        
+        int confirm = JOptionPane.showConfirmDialog(mergePanel,
+            "${actionIcon} ${actionName} '${sourceFull}' into '${targetFull}'?\n\n" +
+            "Source: ${sourceFull} ${isMerge ? '(will be REMOVED)' : '(will be KEPT)'}\n" +
+            "Target: ${targetFull} (will be kept)\n\n" +
+            "Operation: ${isMerge ? 'Replace source with target' : 'Add source tag (keep both)'}",
+            "Confirm ${actionName}",
+            JOptionPane.YES_NO_OPTION)
+        
+        if (confirm != JOptionPane.YES_OPTION) return
+        
+        // Use IconController.getController() instead of MIconController
+        def iconController = IconController.getController()
+        if (iconController == null) {
+            JOptionPane.showMessageDialog(mergePanel,
+                "Icon controller not available.",
+                "Error",
+                JOptionPane.ERROR_MESSAGE)
+            return
+        }
+        
+        def map = boundMapView.getMap()
+        def root = map.getRootNode()
+
+        int updated = 0
+        
+        if (isMerge) {
+            updated = mergeNodes(root, iconController, source, target)
+        } else {
+            updated = assignNodesReverse(root, iconController, target, source)
+        }
+
+        JOptionPane.showMessageDialog(mergePanel,
+            "✅ ${actionName} completed!\n\n" +
+            "Source : ${sourceFull}\n" +
+            "Target : ${targetFull}\n\n" +
+            "Updated nodes : ${updated}",
+            "${actionName} Tag",
+            JOptionPane.INFORMATION_MESSAGE)
+
+        if (tagTree != null) {
+            tagTree.updateUI()
+            refreshTree()
+        }
+        
+        // Reset fields
+        sourceField.setText("")
+        sourceField.setForeground(new Color(100, 100, 100))
+        targetField.setText("")
+        targetField.setForeground(new Color(100, 100, 100))
+        selectionStep = 1
+        statusLabel.setText(" 🔵 Click on a tag in the tree to select as SOURCE")
+        statusLabel.setForeground(new Color(0, 0, 150))
+        mergeButton.setEnabled(false)
+
+    } catch (Exception e) {
+        e.printStackTrace()
+        JOptionPane.showMessageDialog(mergePanel,
+            "Error: ${e.message}",
+            "Error",
+            JOptionPane.ERROR_MESSAGE)
+    }
+}
+
+// ============================================================
+// Merge and Copy functions
+// ============================================================
+
+int mergeNodes(NodeModel node, IconController iconController, String source, String target) {
+    int changed = 0
+    def tags = iconController.getTags(node)
+
+    if (tags != null) {
+        def names = tags.collect{
+            it instanceof Tag ? it.getContent() : it.toString()
+        }
+        if (names.contains(source)) {
+            def removeTag = new Tag(source, null)
+        
+            if (!names.contains(target)) {
+                iconController.addTagsFromSpec(node, target)
+            }
+        
+            iconController.removeTags(node, [removeTag] as Set)
+            changed++
+        }
+    }
+
+    node.getChildren().each{
+        changed += mergeNodes(it, iconController, source, target)
+    }
+
+    return changed
+}
+
+int assignNodesReverse(NodeModel node, IconController iconController, String target, String source) {
+    int changed = 0
+    def tags = iconController.getTags(node)
+
+    if (tags != null) {
+        def names = tags.collect {
+            it instanceof Tag ? it.getContent() : it.toString()
+        }
+
+        if (names.contains(target)) {
+            if (!names.contains(source)) {
+                iconController.addTagsFromSpec(node, source)
+                changed++
+            }
+        }
+    }
+
+    node.getChildren().each {
+        changed += assignNodesReverse(it, iconController, target, source)
+    }
+
+    return changed
+}
+
+
+// ============================================================
+// Merge / Assign from right-click menu
+// ============================================================
 
 JLabel sectionLabel(String text) {
     JLabel label = new JLabel(text)
@@ -3500,7 +4120,6 @@ JLabel sectionLabel(String text) {
     return label
 }
 
-// BoxLayout centres whatever does not say otherwise
 JComponent leftAligned(JComponent component) {
     component.setAlignmentX(Component.LEFT_ALIGNMENT)
     return component
@@ -3513,14 +4132,11 @@ JLabel previewChip(String text) {
     return chip
 }
 
-// shows what the policy WOULD paint: a brand new top-level tag, and a child under it
 void applyPreviewChips(JLabel parentChip, JLabel childChip) {
     Map<String, String> nothingExists = new HashMap<String, String>()
     List<String> parentColors = colorsForNewPath(["parent"], nothingExists)
     Color parentColor = parseTagColor(parentColors.get(0), "parent")
 
-    // for the child, pretend the parent now exists with the colour above — which is
-    // exactly the state the real creation would be in
     Map<String, String> parentExists = new HashMap<String, String>()
     parentExists.put("parent", hexOf(parentColor))
     List<String> childColors = colorsForNewPath(["parent", "child"], parentExists)
@@ -3533,10 +4149,11 @@ void applyPreviewChips(JLabel parentChip, JLabel childChip) {
 }
 
 /*
- ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑ Options dialog ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+ ============================================================================
+ End of Options dialog
+ ============================================================================
 */
 
-// panel-wide maintenance driven by the counts (issue #2948)
 void addUsageMenuItems(JPopupMenu menu) {
     if (!showUsageCounts) return
     def state
@@ -3561,9 +4178,6 @@ void addUsageMenuItems(JPopupMenu menu) {
     sortItem.addActionListener({ ActionEvent e -> applySortByUsage(sortItem.isSelected()) } as ActionListener)
     menu.add(sortItem)
 
-    // Bulk and destructive, so it asks — but as a SUBMENU, which confirms in the same
-    // gesture. (An "arm, then pick it again" confirmation would force the user to reopen
-    // the menu, the very annoyance that got the single Delete fixed.)
     JMenu deleteUnused = new JMenu("Delete all unused tags (" + unused + ")")
     deleteUnused.setEnabled(unused > 0)
     deleteUnused.add(menuItem("Confirm — no node uses them, and Ctrl+Z undoes",
@@ -3571,16 +4185,12 @@ void addUsageMenuItems(JPopupMenu menu) {
     menu.add(deleteUnused)
 }
 
-// Deleting tags that no node uses cannot change any node's tags. The confirmation lives in
-// the menu (a submenu, see addUsageMenuItems) rather than in a modal dialog: modal blocks
-// the EDT and hangs a script host outright, and the panel's idiom is non-modal feedback in
-// the status bar. The whole batch is ONE instruction request, hence one undo step.
 void deleteAllUnusedTags() {
     def state
     try {
         state = readState()
     } catch (Throwable t) {
-        reportReadFailure(t)
+        showStatus("Could not read tags: " + t.getMessage())
         return
     }
     List<Map> victims = unusedTagsToDelete(state)
@@ -3622,8 +4232,6 @@ JMenuItem menuItem(String text, Closure action) {
  ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Map filter by tag ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
 */
 
-// filters the MAP to the nodes carrying the tag (or any of its subtags), opening the
-// folded branches to reveal them — and remembering what was opened, to restore on clear
 void filterMapByTag(TagRow row) {
     String qn = row.qualifiedName
     String prefix = qn + separator()
@@ -3663,8 +4271,6 @@ void unfoldAncestorsTracking(Collection<NodeModel> matches, Filter filter) {
     }
 }
 
-// ⚠️ NOT applyNoFiltering: a raw ICondition never enters the toolbar combo, so that
-// path is a no-op (verified in SearchPanel). The NO_FILTERING sentinel clears synchronously.
 void clearMapFilter(boolean announce) {
     if (!mapFilterActive && nodesUnfoldedByFilter.isEmpty()) return
 
@@ -3724,23 +4330,12 @@ int fittedHeight(int panelWidth) {
     invalidatePreferredSizeCache()
     int preferred = (int) tagPanel.getPreferredSize().height
 
-    // The horizontal scroll bar (a long or deeply nested tag overflows the width) is painted
-    // INSIDE the tree's scroll pane and eats ~17px off the bottom — which clips the last row
-    // and brings up a VERTICAL bar too, with room to spare in the viewport. Reserve its
-    // height in advance. Capped by the viewport below: when there is no room left to grow,
-    // the vertical bar is legitimate.
     if (horizontalScrollBarNeeded(panelWidth)) {
         preferred += (int) treeScrollPane.getHorizontalScrollBar().getPreferredSize().height
     }
     return Math.min(preferred, viewportHeight())
 }
 
-// ⚠️ `Container.getPreferredSize()` returns a CACHED value while the container is VALID —
-// it only recomputes when invalid. And `JScrollPane` is a validate root, so `revalidate()`
-// inside the tree stops there and NEVER invalidates the panel above it: the panel would be
-// measured against the tree it had one refresh ago. MEASURED symptom: panel 390px tall when
-// it wanted 398 + 17, two rows clipped and a vertical scroll bar with 912px of room to
-// spare. Invalidate the chain by hand before asking anyone their preferred size.
 void invalidatePreferredSizeCache() {
     if (tagTree != null) tagTree.invalidate()
     if (treeScrollPane != null) treeScrollPane.invalidate()
@@ -3748,15 +4343,10 @@ void invalidatePreferredSizeCache() {
     if (tagPanel != null) tagPanel.invalidate()
 }
 
-// PREDICTED from the width, never read from the layout: isVisible() on the bar only updates
-// after the layout settles, so reserving by it would still show one frame with the spurious
-// vertical bar. This is synchronous — does the widest row fit in the usable width?
 boolean horizontalScrollBarNeeded(int panelWidth) {
     if (treeScrollPane == null || tagTree == null || tagTree.getRowCount() == 0) return false
 
     int contentWidth = (int) tagTree.getPreferredSize().width
-    // if the rows already overflow the viewport height, the vertical bar WILL appear and
-    // steal width from the tree — count it in, or the prediction is off by its width
     boolean verticalLikely = ((int) tagPanel.getPreferredSize().height) > viewportHeight()
     int verticalWidth = verticalLikely ? (int) treeScrollPane.getVerticalScrollBar().getPreferredSize().width : 0
     int availableWidth = panelWidth - 2 * panelBorderThickness - verticalWidth
@@ -3806,8 +4396,6 @@ void animatePanelToWidth(int targetWidth) {
     resizeAnimationTimer.start()
 }
 
-// anchored to the TOP-RIGHT edge of the viewport (SearchPanel owns the top-left).
-// x is recomputed from the width on every change — the right edge is the fixed one.
 void applyPanelBounds(int width) {
     if (tagPanel == null) return
     int height = fittedHeight(width)
@@ -3831,25 +4419,63 @@ void applyPanelBounds(int width) {
  ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓ Utilities ↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓↓
 */
 
-void showStatus(String message) {
-    if (statusLabel == null) return
-    statusAction = null
-    statusLabel.setText(" " + message)
-    statusLabel.setCursor(Cursor.getDefaultCursor())
-    statusLabel.setToolTipText(null)
+// Get qualified tag name considering parents
+String getTagQualifiedName(def icon) {
+    try {
+        def tag = icon.getTag()
+        if (tag == null) return null
+        
+        // Use qualifiedTag (like sample code)
+        try {
+            def qualified = tag.getQualifiedTag()
+            if (qualified != null) {
+                String content = qualified.getContent()
+                if (content != null && !content.isEmpty()) {
+                    return content
+                }
+            }
+        } catch (Throwable t) {
+            // If qualifiedTag is not available, use alternative method
+        }
+        
+        // Alternative method: get from TagCategories
+        String simpleName = tag.getContent()
+        if (simpleName == null || simpleName.isEmpty()) {
+            simpleName = tag.toString()
+        }
+        
+        try {
+            def state = readState()
+            Map<String, String> allTags = new HashMap<String, String>()
+            
+            def collect = { cat ->
+                allTags.put(cat.qualifiedName, cat.name)
+                cat.children.each { collect(it) }
+            }
+            state.categories.each { collect(it) }
+            state.uncategorizedTags.each { 
+                allTags.put(it.qualifiedName, it.name)
+            }
+            
+            for (Map.Entry<String, String> entry : allTags.entrySet()) {
+                if (entry.getValue() == simpleName) {
+                    return entry.getKey()
+                }
+            }
+            
+            return simpleName
+            
+        } catch (Throwable t) {
+            return simpleName
+        }
+        
+    } catch (Throwable t) {
+        return null
+    }
 }
 
-/**
- * A status message that is also a button: underlined, hand cursor, and clicking it runs
- * `action`. Used when the panel cannot do its job but knows how to fix it, and the fix
- * touches the map — so it must be the user who asks for it, not us.
- */
-void showActionableStatus(String message, String tooltip, Closure action) {
-    if (statusLabel == null) return
-    statusLabel.setText("<html><u> " + HtmlUtils.toXMLEscapedText(message) + "</u></html>")
-    statusLabel.setCursor(Cursor.getPredefinedCursor(Cursor.HAND_CURSOR))
-    statusLabel.setToolTipText(tooltip)
-    statusAction = action
+void showStatus(String message) {
+    if (statusLabel != null) statusLabel.setText(" " + message)
 }
 
 JPanel transparentPanel(LayoutManager layout) {
@@ -3876,14 +4502,7 @@ Color panelBorderColor() {
     return new Color(base.getRed(), base.getGreen(), base.getBlue(), panelBorderOpacity)
 }
 
-// ⚠️ `double`, not `float`: in Groovy `anInt / 255f` evaluates to a DOUBLE (division never
-// yields a float), and a Double does NOT match a primitive `float` parameter when the call is
-// dispatched from inside an anonymous inner class — it fails with "No signature of method:
-// UnifiedTagPanel$<n>.blendColors() ... (Color, Color, Double)". It stayed hidden for as long
-// as every tag was opaque, because chipColor returns early on alpha 255 and only a TRANSLUCENT
-// tag colour ever reaches this call. A `double` parameter accepts float, double and BigDecimal
-// alike, so the whole family of surprises is gone.
-Color blendColors(Color base, Color tint, double ratio) {
+Color blendColors(Color base, Color tint, float ratio) {
     return new Color(
             (int) (base.getRed() + (tint.getRed() - base.getRed()) * ratio),
             (int) (base.getGreen() + (tint.getGreen() - base.getGreen()) * ratio),
@@ -3909,18 +4528,15 @@ void addHoverListenerRecursively(Component component) {
     }
 }
 
-// markers checked against the actual font; missing glyphs get ASCII fallbacks
 void pickGlyphs() {
     Font font = itemFont()
     if (font.canDisplayUpTo(markAll) != -1) markAll = "*"
     if (font.canDisplayUpTo(markSome) != -1) markSome = "~"
-    if (font.canDisplayUpTo(editSymbol) != -1) editSymbol = "#"
     if (font.canDisplayUpTo(favoriteSymbol) != -1) favoriteSymbol = "!"
     if (font.canDisplayUpTo(filterHidesSymbol) != -1) filterHidesSymbol = "v"
     if (font.canDisplayUpTo(highlightOnlySymbol) != -1) highlightOnlySymbol = "-"
 }
 
-// per-character accent folding — same length in and out (see SearchPanel for the contract)
 String foldAccents(String text) {
     StringBuilder out = null
     for (int i = 0; i < text.length(); i++) {
@@ -3951,6 +4567,132 @@ char foldChar(char ch) {
     return base
 }
 
+
+
+
+// ============================================================
+// Tag Click Locator - Click on tag in the map
+// ============================================================
+
+void installClickLocator() {
+    JRootPane anchor = findMainRootPane()
+    if (anchor == null) {
+        showStatus("📍 Tag click locator: main window not found.")
+        return
+    }
+    
+    Object existing = anchor.getClientProperty(CLICK_LOCATOR_KEY)
+    if (existing != null) {
+        Toolkit.getDefaultToolkit().removeAWTEventListener((AWTEventListener) existing)
+        anchor.putClientProperty(CLICK_LOCATOR_KEY, null)
+        tagClickLocatorListener = null
+        showStatus("📍 Locator: OFF")
+        return
+    }
+    
+    tagClickLocatorListener = new AWTEventListener() {
+        @Override
+        void eventDispatched(AWTEvent event) {
+            if (!(event instanceof MouseEvent)) return
+            MouseEvent e = (MouseEvent) event
+            if (e.getID() != MouseEvent.MOUSE_CLICKED) return
+            if (e.getButton() != MouseEvent.BUTTON1 || e.getClickCount() != 1) return
+            Component comp = e.getComponent()
+            if (comp == null) return
+            
+            if (!comp.getClass().getName().endsWith("MapViewIconListComponent")) return
+            try {
+                def icon = comp.getIconAt(e.getPoint())
+                if (icon == null) return
+                if (!icon.getClass().getName().endsWith("TagIcon")) return
+                
+                String qualified = icon.getTag().qualifiedTag().getContent()
+                if (qualified != null && !qualified.isEmpty()) {
+                    SwingUtilities.invokeLater({
+                        revealTagInTree(qualified)
+                    })
+                }
+            } catch (Throwable ignore) {}
+        }
+    }
+    
+    Toolkit.getDefaultToolkit().addAWTEventListener(tagClickLocatorListener, AWTEvent.MOUSE_EVENT_MASK)
+    anchor.putClientProperty(CLICK_LOCATOR_KEY, tagClickLocatorListener)
+    showStatus("📍 Locator: ON — click a TAG on a node to locate it")
+}
+
+// ============================================================
+
+// Find node by content
+DefaultMutableTreeNode findNodeByContent(DefaultMutableTreeNode node, String qualified) {
+    if (node == null) return null
+    
+    def userObj = node.getUserObject()
+    if (userObj instanceof TagRow) {
+        if (qualified.equals(userObj.qualifiedName)) {
+            return node
+        }
+    }
+    
+    for (int i = 0; i < node.getChildCount(); i++) {
+        def child = node.getChildAt(i)
+        if (child instanceof DefaultMutableTreeNode) {
+            def result = findNodeByContent(child, qualified)
+            if (result != null) return result
+        }
+    }
+    return null
+}
+
+void revealTagInTree(String qualifiedContent) {
+    if (tagTree == null || treeRootNode == null) {
+        showStatus("📍 Tag tree not available")
+        return
+    }
+    
+    clearFilterIfActive()
+    
+    def targetNode = findNodeByContent(treeRootNode, qualifiedContent)
+    
+    if (targetNode == null) {
+        showStatus("📍 Tag '${qualifiedContent}' not found in tree")
+        return
+    }
+    
+    TreePath path = new TreePath(targetNode.getPath())
+    if (path.getParentPath() != null) {
+        tagTree.expandPath(path.getParentPath())
+    }
+    tagTree.setSelectionPath(path)
+    tagTree.scrollPathToVisible(path)
+    showStatus("📍 Located: ${qualifiedContent}")
+}
+
+// Clear filter
+void clearFilterIfActive() {
+    if (filterField != null && !filterField.getText().trim().isEmpty()) {
+        filterField.setText("")
+        filterText = ""
+        applyFilterText()
+    }
+    if (tagTree != null) {
+        try {
+            tagTree.setFilter(null)
+        } catch (Throwable ignore) {}
+    }
+}
+
+JRootPane findMainRootPane() {
+    for (Window w : Window.getWindows()) {
+        if (w.isShowing() && w instanceof JFrame) {
+            return ((JFrame) w).getRootPane()
+        }
+    }
+    return null
+}
+
 /*
- ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑ Utilities ↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑↑
+ ============================================================================
+ End of Utilities
+ ============================================================================
 */
